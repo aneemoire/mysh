@@ -8,6 +8,11 @@
 #define TOKENS_INIT 16 // начальная ёмкость массива токенов, штук
 #define OPERATOR_CHARS "|&;()<>\n"
 
+typedef enum {
+    MODE_NORMAL,
+    MODE_SQUOTE, 
+    MODE_DQUOTE 
+} lex_mode;
 
 // буфер для слова, который будет заполняться по мере чтения символов
 
@@ -67,9 +72,9 @@ void token_list_free(token_list *l)
 
 // Если в буфере есть слово — превращает его в токен TOK_WORD и очищает буфер
 
-static bool flush_word(token_list *l, strbuf *b)
+static bool flush_word(token_list *l, strbuf *b,  bool *in_word)
 {
-    if (b->len == 0)
+    if (!*in_word)
         return true;
 
     char *text = malloc(b->len + 1);
@@ -83,6 +88,7 @@ static bool flush_word(token_list *l, strbuf *b)
         return false;
     }
     b->len = 0;
+    *in_word = false;
     return true;
 }
 
@@ -119,43 +125,90 @@ lex_status lex(const char *s, token_list *out)
     if (!strbuf_init(&word))
         return LEX_NOMEM;
 
+    lex_mode mode = MODE_NORMAL;
+    bool in_word = false;
+    lex_status status = LEX_OK; 
     size_t i = 0;
     for (;;) {
         char c = s[i];
 
-        if (c == '\0') {
-            break;
-        } else if (c == ' ' || c == '\t') {
-            if (!flush_word(out, &word))
+        if (mode == MODE_SQUOTE) {
+            if (c == '\0') {
+                status = LEX_UNCLOSED_QUOTE;
+                goto fail;
+            }
+            if (c == '\'')
+                mode = MODE_NORMAL;
+            else if (!strbuf_push(&word, c))
                 goto oom;
             i++;
+
+        } else if (mode == MODE_DQUOTE) {
+            if (c == '\0') {
+                status = LEX_UNCLOSED_QUOTE;
+                goto fail;
+            }
+            if (c == '"')
+                mode = MODE_NORMAL;
+            else if (!strbuf_push(&word, c))
+                goto oom;
+            i++;
+        } else {
+            if (c == '\0') {
+                break; 
         } else if (c == ' ' || c == '\t') {
-            if (!flush_word(out, &word))
+            if (!flush_word(out, &word, &in_word))
                 goto oom;
             i++;
         } else if (strchr(OPERATOR_CHARS, c) != NULL) {
             size_t len;
             token_type type = read_operator(s + i, &len);
-            if (!flush_word(out, &word) || !list_push(out, type, NULL))
+            if (!flush_word(out, &word, &in_word) || !list_push(out, type, NULL))
                 goto oom;
             i += len;
+        } else if (c == '\'') {
+                mode = MODE_SQUOTE;
+                in_word = true;
+                i++;
+        } else if (c == '"') {
+                mode = MODE_DQUOTE;
+                in_word = true;
+                i++;
         } else {
             if (!strbuf_push(&word, c))
                 goto oom;
+            in_word = true;
             i++;
-        }
+            }
+        }   
     }
 
-    if (!flush_word(out, &word) || !list_push(out, TOK_EOF, NULL))
+    if (!flush_word(out, &word, &in_word) || !list_push(out, TOK_EOF, NULL))
         goto oom;
 
     free(word.data);
     return LEX_OK;
 
 oom:
+    status = LEX_NOMEM;
+
+fail:
     free(word.data);
     token_list_free(out);
-    return LEX_NOMEM;
+    return status;
+
+}
+
+// Сообщения об ошибках
+
+const char *lex_status_message(lex_status status)
+{
+    switch (status) {
+    case LEX_OK:              return "ok";
+    case LEX_UNCLOSED_QUOTE:  return "syntax error: unexpected EOF while looking for matching quote";
+    case LEX_NOMEM:           return "out of memory";
+    }
+    return "unknown error";
 }
 
 // Отладочный вывод 

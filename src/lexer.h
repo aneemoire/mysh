@@ -33,12 +33,15 @@ typedef struct {
 
 typedef enum {
     LEX_OK,
-    LEX_NOMEM
+    LEX_UNCLOSED_QUOTE, // ошибка: не закрыта кавычка
+    LEX_NOMEM // ошибка: не хватает памяти
 } lex_status;
 
 lex_status lex(const char *input, token_list *out);
 
 void token_list_free(token_list *list);
+
+const char *lex_status_message(lex_status status);
 
 void token_list_dump(const token_list *list, FILE *out);
 
