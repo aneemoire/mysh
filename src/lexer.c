@@ -182,6 +182,9 @@ lex_status lex(const char *s, token_list *out)
             if (!flush_word(out, &word, &in_word) || !list_push(out, type, NULL))
                 goto oom;
             i += len;
+        } else if (c == '#' && !in_word) {
+                while (s[i] != '\0' && s[i] != '\n')
+                    i++;
         } else if (c == '\'') {
                 mode = MODE_SQUOTE;
                 in_word = true;
