@@ -122,3 +122,20 @@ oom:
     token_list_free(out);
     return LEX_NOMEM;
 }
+
+// Отладочный вывод 
+
+void token_list_dump(const token_list *list, FILE *out)
+{
+    for (size_t i = 0; i < list->count; i++) {
+        const token *t = &list->items[i];
+        switch (t->type) {
+        case TOK_WORD:
+            fprintf(out, "WORD    [%s]\n", t->text); 
+            break;
+        case TOK_EOF:
+            fprintf(out, "EOF\n");
+            break;
+        }
+    }
+}

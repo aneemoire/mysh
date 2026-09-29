@@ -2,6 +2,7 @@
 #define LEXER_H
 
 #include <stddef.h>
+#include <stdio.h>
 
 typedef enum {
     TOK_WORD,
@@ -27,5 +28,7 @@ typedef enum {
 lex_status lex(const char *input, token_list *out);
 
 void token_list_free(token_list *list);
+
+void token_list_dump(const token_list *list, FILE *out);
 
 #endif
