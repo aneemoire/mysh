@@ -6,6 +6,17 @@
 
 typedef enum {
     TOK_WORD,
+    TOK_PIPE,    // |
+    TOK_AMP,     // &
+    TOK_SEMI,    // ;
+    TOK_AND_IF,  // &&
+    TOK_OR_IF,   // ||
+    TOK_LPAREN,  // (
+    TOK_RPAREN,  // )
+    TOK_LESS,    // <
+    TOK_GREAT,   // >
+    TOK_DGREAT,  // >>
+    TOK_NEWLINE,
     TOK_EOF
 } token_type;
 
