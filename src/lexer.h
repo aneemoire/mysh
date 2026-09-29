@@ -34,6 +34,7 @@ typedef struct {
 typedef enum {
     LEX_OK,
     LEX_UNCLOSED_QUOTE, // ошибка: не закрыта кавычка
+    LEX_TRAILING_ESCAPE, // ошибка: обратный слэш в конце строки
     LEX_NOMEM // ошибка: не хватает памяти
 } lex_status;
 

@@ -148,11 +148,27 @@ lex_status lex(const char *s, token_list *out)
                 status = LEX_UNCLOSED_QUOTE;
                 goto fail;
             }
-            if (c == '"')
+            if (c == '"'){
                 mode = MODE_NORMAL;
-            else if (!strbuf_push(&word, c))
-                goto oom;
-            i++;
+                i++;
+            } else if (c == '\\') {
+                char n = s[i + 1];
+                if (n == '"' || n == '\\') {    
+                    if (!strbuf_push(&word, n))
+                        goto oom;
+                    i += 2;
+                } else if (n == '\n') {
+                    i += 2;
+                } else {                         
+                    if (!strbuf_push(&word, '\\'))
+                        goto oom;
+                    i++;
+                }
+            } else {
+                if (!strbuf_push(&word, c))
+                    goto oom;
+                i++;
+            }
         } else {
             if (c == '\0') {
                 break; 
@@ -174,11 +190,29 @@ lex_status lex(const char *s, token_list *out)
                 mode = MODE_DQUOTE;
                 in_word = true;
                 i++;
-        } else {
-            if (!strbuf_push(&word, c))
-                goto oom;
-            in_word = true;
-            i++;
+        } else if (c == '\\') {
+                char n = s[i + 1];
+                if (n == '\0') {
+                    status = LEX_TRAILING_ESCAPE;
+                    goto fail;
+                }
+                if (n == '\n') {
+                    if (s[i + 2] == '\0') {
+                        status = LEX_TRAILING_ESCAPE;
+                        goto fail;
+                    }
+                    i += 2;
+                } else {
+                    if (!strbuf_push(&word, n))
+                        goto oom;
+                    in_word = true;
+                    i += 2;
+                }
+            } else {
+                if (!strbuf_push(&word, c))
+                    goto oom;
+                in_word = true;
+                i++;
             }
         }   
     }
@@ -207,6 +241,7 @@ const char *lex_status_message(lex_status status)
     case LEX_OK:              return "ok";
     case LEX_UNCLOSED_QUOTE:  return "syntax error: unexpected EOF while looking for matching quote";
     case LEX_NOMEM:           return "out of memory";
+    case LEX_TRAILING_ESCAPE: return "syntax error: unexpected EOF after backslash";
     }
     return "unknown error";
 }
