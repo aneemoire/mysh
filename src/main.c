@@ -1,3 +1,12 @@
+/*
+    main.c — временная точка входа для проверки лексера.
+
+    mysh --dump-tokens -c 'строка' 
+        разбить одну строку и вывести токены
+    mysh --dump-tokens    
+        читать команды из stdin и выводить токены
+ */
+
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
