@@ -122,6 +122,125 @@ static token_type read_operator(const char *s, size_t *len)
     }
 }
 
+typedef enum {
+    STEP_CONTINUE, 
+    STEP_DONE, 
+    STEP_ERROR 
+} step_result;
+
+static step_result step_squote(const char *s, size_t *i, strbuf *word, lex_mode *mode, lex_status *status)
+{
+    char c = s[*i];
+    if (c == '\0') {
+        *status = LEX_UNCLOSED_QUOTE;
+        return STEP_ERROR;
+    }
+    if (c == '\'') {
+        *mode = MODE_NORMAL;
+    } else if (!strbuf_push(word, c)) {
+        *status = LEX_NOMEM;
+        return STEP_ERROR;
+    }
+    (*i)++;
+    return STEP_CONTINUE;
+}
+
+static step_result step_dquote(const char *s, size_t *i, strbuf *word, lex_mode *mode, lex_status *status)
+{
+    char c = s[*i];
+    if (c == '\0') {
+        *status = LEX_UNCLOSED_QUOTE;
+        return STEP_ERROR;
+    }
+    if (c == '"') {
+        *mode = MODE_NORMAL;
+        (*i)++;
+        return STEP_CONTINUE;
+    }
+    if (c == '\\') {
+        char n = s[*i + 1];
+        if (n == '"' || n == '\\') {
+            if (!strbuf_push(word, n)) { *status = LEX_NOMEM; return STEP_ERROR; }
+            *i += 2;
+        } else if (n == '\n') { 
+            *i += 2;
+        } else {
+            if (!strbuf_push(word, '\\')) { *status = LEX_NOMEM; return STEP_ERROR; }
+            (*i)++;
+        }
+        return STEP_CONTINUE;
+    }
+    if (!strbuf_push(word, c)) { *status = LEX_NOMEM; return STEP_ERROR; }
+    (*i)++;
+    return STEP_CONTINUE;
+}
+
+static step_result step_normal(const char *s, size_t *i, strbuf *word, bool *in_word, lex_mode *mode, token_list *out, lex_status *status)
+{
+    char c = s[*i];
+ 
+    if (c == '\0')
+        return STEP_DONE;
+ 
+    if (c == ' ' || c == '\t') {
+        if (!flush_word(out, word, in_word)) { *status = LEX_NOMEM; return STEP_ERROR; }
+        (*i)++;
+        return STEP_CONTINUE;
+    }
+ 
+    if (strchr(OPERATOR_CHARS, c) != NULL) {
+        size_t len;
+        token_type type = read_operator(s + *i, &len);
+        if (!flush_word(out, word, in_word) || !list_push(out, type, NULL)) {
+            *status = LEX_NOMEM;
+            return STEP_ERROR;
+        }
+        *i += len;
+        return STEP_CONTINUE;
+    }
+ 
+    if (c == '#' && !*in_word) {
+        while (s[*i] != '\0' && s[*i] != '\n')
+            (*i)++;
+        return STEP_CONTINUE;
+    }
+ 
+    if (c == '\'') {
+        *mode = MODE_SQUOTE;
+        *in_word = true;
+        (*i)++;
+        return STEP_CONTINUE;
+    }
+ 
+    if (c == '"') {
+        *mode = MODE_DQUOTE;
+        *in_word = true;
+        (*i)++;
+        return STEP_CONTINUE;
+    }
+ 
+    if (c == '\\') {
+        char n = s[*i + 1];
+        if (n == '\0') {
+            *status = LEX_TRAILING_ESCAPE;
+            return STEP_ERROR;
+        }
+        if (n == '\n') {
+            if (s[*i + 2] == '\0') { *status = LEX_TRAILING_ESCAPE; return STEP_ERROR; }
+            *i += 2;
+            return STEP_CONTINUE;
+        }
+        if (!strbuf_push(word, n)) { *status = LEX_NOMEM; return STEP_ERROR; }
+        *in_word = true;
+        *i += 2;
+        return STEP_CONTINUE;
+    }
+ 
+    if (!strbuf_push(word, c)) { *status = LEX_NOMEM; return STEP_ERROR; }
+    *in_word = true;
+    (*i)++;
+    return STEP_CONTINUE;
+}
 // основная функция
 
 lex_status lex(const char *s, token_list *out)
@@ -137,104 +256,27 @@ lex_status lex(const char *s, token_list *out)
     lex_status status = LEX_OK; 
     size_t i = 0;
     for (;;) {
-        char c = s[i];
-
-        if (mode == MODE_SQUOTE) {
-            if (c == '\0') {
-                status = LEX_UNCLOSED_QUOTE;
-                goto fail;
-            }
-            if (c == '\'')
-                mode = MODE_NORMAL;
-            else if (!strbuf_push(&word, c))
-                goto oom;
-            i++;
-
-        } else if (mode == MODE_DQUOTE) {
-            if (c == '\0') {
-                status = LEX_UNCLOSED_QUOTE;
-                goto fail;
-            }
-            if (c == '"'){
-                mode = MODE_NORMAL;
-                i++;
-            } else if (c == '\\') {
-                char n = s[i + 1];
-                if (n == '"' || n == '\\') {    
-                    if (!strbuf_push(&word, n))
-                        goto oom;
-                    i += 2;
-                } else if (n == '\n') {
-                    i += 2;
-                } else {                         
-                    if (!strbuf_push(&word, '\\'))
-                        goto oom;
-                    i++;
-                }
-            } else {
-                if (!strbuf_push(&word, c))
-                    goto oom;
-                i++;
-            }
-        } else {
-            if (c == '\0') {
-                break; 
-        } else if (c == ' ' || c == '\t') {
-            if (!flush_word(out, &word, &in_word))
-                goto oom;
-            i++;
-        } else if (strchr(OPERATOR_CHARS, c) != NULL) {
-            size_t len;
-            token_type type = read_operator(s + i, &len);
-            if (!flush_word(out, &word, &in_word) || !list_push(out, type, NULL))
-                goto oom;
-            i += len;
-        } else if (c == '#' && !in_word) {
-                while (s[i] != '\0' && s[i] != '\n')
-                    i++;
-        } else if (c == '\'') {
-                mode = MODE_SQUOTE;
-                in_word = true;
-                i++;
-        } else if (c == '"') {
-                mode = MODE_DQUOTE;
-                in_word = true;
-                i++;
-        } else if (c == '\\') {
-                char n = s[i + 1];
-                if (n == '\0') {
-                    status = LEX_TRAILING_ESCAPE;
-                    goto fail;
-                }
-                if (n == '\n') {
-                    if (s[i + 2] == '\0') {
-                        status = LEX_TRAILING_ESCAPE;
-                        goto fail;
-                    }
-                    i += 2;
-                } else {
-                    if (!strbuf_push(&word, n))
-                        goto oom;
-                    in_word = true;
-                    i += 2;
-                }
-            } else {
-                if (!strbuf_push(&word, c))
-                    goto oom;
-                in_word = true;
-                i++;
-            }
-        }   
+        step_result r;
+        if (mode == MODE_SQUOTE)
+            r = step_squote(s, &i, &word, &mode, &status);
+        else if (mode == MODE_DQUOTE)
+            r = step_dquote(s, &i, &word, &mode, &status);
+        else
+            r = step_normal(s, &i, &word, &in_word, &mode, out, &status);
+ 
+        if (r == STEP_ERROR)
+            goto fail;
+        if (r == STEP_DONE)
+            break;
     }
 
-    if (!flush_word(out, &word, &in_word) || !list_push(out, TOK_EOF, NULL))
-        goto oom;
-
+    if (!flush_word(out, &word, &in_word) || !list_push(out, TOK_EOF, NULL)){
+        status = LEX_NOMEM;
+        goto fail;
+    }
+    
     free(word.data);
     return LEX_OK;
-
-oom:
-    status = LEX_NOMEM;
 
 fail:
     free(word.data);

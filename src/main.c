@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include "lexer.h"
+#include "getline.h"
 
 #define EXIT_SYNTAX 2
 
