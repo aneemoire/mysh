@@ -11,7 +11,7 @@ parser.c - синтаксический анализ
 
 #define ARGV_INIT  8 // начальная ёмкость временного массива слов, штук 
 #define REDIR_INIT 4 // начальная ёмкость временного массива redirs, штук
-
+#define PIPELINE_CMDS_INIT 2 // начальная ёмкость временного массива команд в конвейере, штук
 
 typedef struct {
     const token *items;
@@ -185,6 +185,8 @@ fail:
     return false;
 }
 
+static void ast_list_free_contents(ast_list *list);
+
 static void command_free(command *cmd)
 {
     if (cmd->type == CMD_SIMPLE) {
@@ -198,21 +200,32 @@ static void command_free(command *cmd)
     }
 }
 
-void ast_list_free(ast_list *list)
+static void pipeline_free(pipeline *pl)
 {
-    for (size_t i = 0; i < list->count; i++) {
-        and_or *ao = &list->items[i];
-        for (size_t j = 0; j < ao->count; j++) {
-            pipeline *pl = &ao->pipelines[j];
-            for (size_t k = 0; k < pl->count; k++)
-                command_free(&pl->commands[k]);
-            free(pl->commands);
-        }
-        free(ao->pipelines);
-        free(ao->ops);
-    }
+    for (size_t i = 0; i < pl->count; i++)
+        command_free(&pl->commands[i]);
+    free(pl->commands);
+}
+
+static void and_or_free(and_or *ao)
+{
+    for (size_t i = 0; i < ao->count; i++)
+        pipeline_free(&ao->pipelines[i]);
+    free(ao->pipelines);
+    free(ao->ops);
+}
+
+static void ast_list_free_contents(ast_list *list)
+{
+    for (size_t i = 0; i < list->count; i++)
+        and_or_free(&list->items[i]);
     free(list->items);
     free(list->seps);
+}
+
+void ast_list_free(ast_list *list)
+{
+    ast_list_free_contents(list);
     list->items = NULL;
     list->seps = NULL;
     list->count = 0;
@@ -311,48 +324,96 @@ void ast_list_dump(const ast_list *list, FILE *out)
     ast_list_dump_at(list, out, 0);
 }
 
+static bool parse_command(parser_state *p, command *out, char **error)
+{
+    if (peek(p)->type == TOK_LPAREN) {
+        *error = make_error("subshells are not supported yet");
+        return false;
+    }
+ 
+    simple_command simple;
+    if (!parse_simple(p, &simple, error))
+        return false;
+ 
+    out->type = CMD_SIMPLE;
+    out->as.simple = simple;
+    return true;
+}
+
+static bool parse_pipeline(parser_state *p, pipeline *out, char **error)
+{
+    command *data = NULL;
+    size_t count = 0, cap = 0;
+ 
+    for (;;) {
+        command cmd;
+        if (!parse_command(p, &cmd, error))
+            goto fail;
+ 
+        if (count == cap) {
+            size_t new_cap = cap ? cap * 2 : PIPELINE_CMDS_INIT;
+            command *np = realloc(data, new_cap * sizeof *np);
+            if (np == NULL) {
+                command_free(&cmd);
+                *error = NULL;
+                goto fail;
+            }
+            data = np;
+            cap = new_cap;
+        }
+        data[count++] = cmd;
+ 
+        if (peek(p)->type != TOK_PIPE)
+            break;
+        advance(p); 
+    }
+ 
+    out->commands = data;
+    out->count = count;
+    return true;
+ 
+fail:
+    for (size_t i = 0; i < count; i++)
+        command_free(&data[i]);
+    free(data);
+    return false;
+}
 
 parse_status parse(const token_list *tokens, ast_list *out, char **error)
 {
     parser_state state = { .items = tokens->items, .count = tokens->count, .pos = 0 };
 
-    simple_command simple;
-    if (!parse_simple(&state, &simple, error))
+    pipeline pl;
+    if (!parse_pipeline(&state, &pl, error))
         return *error == NULL ? PARSE_NOMEM : PARSE_SYNTAX_ERROR;
 
-    command *cmd = malloc(sizeof *cmd);
-    pipeline *pl = malloc(sizeof *pl);
-    and_or *ao = malloc(sizeof *ao);
+    pipeline *pipelines = malloc(sizeof *pipelines);
+    and_or *items = malloc(sizeof *items);
     list_sep *seps = malloc(sizeof *seps);
-    if (cmd == NULL || pl == NULL || ao == NULL || seps == NULL) {
-        free(cmd); free(pl); free(ao); free(seps);
-        simple_command_free(&simple);
+    if (pipelines == NULL || items == NULL || seps == NULL) {
+        free(pipelines); free(items); free(seps);
+        pipeline_free(&pl);
         return PARSE_NOMEM;
     }
-
-    cmd->type = CMD_SIMPLE;
-    cmd->as.simple = simple;
-    pl->commands = cmd;
-    pl->count = 1;
-    ao->pipelines = pl;
-    ao->ops = NULL;
-    ao->count = 1;
+ 
+    pipelines[0] = pl;
+    items[0] = (and_or){ .pipelines = pipelines, .ops = NULL, .count = 1 };
     seps[0] = SEP_NONE;
-
+ 
     if (peek(&state)->type == TOK_NEWLINE)
         advance(&state);
     if (peek(&state)->type != TOK_EOF) {
-        free(cmd); free(pl); free(ao); free(seps);
-        simple_command_free(&simple);
-        char *msg = make_error("unexpected token "
-                                "(pipelines, lists and subshells are not supported yet)");
+        and_or_free(&items[0]);
+        free(items);
+        free(seps);
+        char *msg = make_error("unexpected token (lists and subshells are not supported yet)");
         if (msg == NULL)
             return PARSE_NOMEM;
         *error = msg;
         return PARSE_SYNTAX_ERROR;
     }
-
-    out->items = ao;
+ 
+    out->items = items;
     out->seps = seps;
     out->count = 1;
     return PARSE_OK;
