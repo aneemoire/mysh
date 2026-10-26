@@ -12,6 +12,7 @@ parser.c - синтаксический анализ
 #define ARGV_INIT  8 // начальная ёмкость временного массива слов, штук 
 #define REDIR_INIT 4 // начальная ёмкость временного массива redirs, штук
 #define PIPELINE_CMDS_INIT 2 // начальная ёмкость временного массива команд в конвейере, штук
+#define AND_OR_INIT 2 // начальная ёмкость временных массивов в parse_and_or, штук
 
 typedef struct {
     const token *items;
@@ -376,6 +377,58 @@ fail:
     for (size_t i = 0; i < count; i++)
         command_free(&data[i]);
     free(data);
+    return false;
+}
+
+static bool parse_and_or(parser_state *p, and_or *out, char **error)
+{
+    pipeline *pipelines = NULL;
+    and_or_op *ops = NULL;
+    size_t count = 0, cap = 0;
+ 
+    for (;;) {
+        pipeline pl;
+        if (!parse_pipeline(p, &pl, error))
+            goto fail;
+ 
+        if (count == cap) {
+            size_t new_cap = cap ? cap * 2 : AND_OR_INIT;
+            pipeline *np = realloc(pipelines, new_cap * sizeof *np);
+            if (np == NULL) {
+                pipeline_free(&pl);
+                *error = NULL;
+                goto fail;
+            }
+            pipelines = np;
+            and_or_op *nop = realloc(ops, new_cap * sizeof *nop);
+            if (nop == NULL) {
+                pipeline_free(&pl);
+                *error = NULL;
+                goto fail;
+            }
+            ops = nop;
+            cap = new_cap;
+        }
+        pipelines[count] = pl;
+        count++;
+ 
+        token_type t = peek(p)->type;
+        if (t != TOK_AND_IF && t != TOK_OR_IF)
+            break;
+        ops[count - 1] = (t == TOK_AND_IF) ? AND_IF_OP : OR_IF_OP;
+        advance(p);
+    }
+ 
+    out->pipelines = pipelines;
+    out->ops = ops;
+    out->count = count;
+    return true;
+ 
+fail:
+    for (size_t i = 0; i < count; i++)
+        pipeline_free(&pipelines[i]);
+    free(pipelines);
+    free(ops);
     return false;
 }
 
