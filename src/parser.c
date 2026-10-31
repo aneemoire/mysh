@@ -14,11 +14,13 @@ parser.c - синтаксический анализ
 #define PIPELINE_CMDS_INIT 2 // начальная ёмкость временного массива команд в конвейере, штук
 #define AND_OR_INIT 2 // начальная ёмкость временных массивов в parse_and_or, штук
 #define LIST_INIT 2 // начальная ёмкость временных массивов в parse_list, штук 
+#define MAX_NEST_DEPTH 1000 // максимум вложенных скобок: защита стека от патологического ввода
 
 typedef struct {
     const token *items;
     size_t count;
     size_t pos;
+    int depth;
 } parser_state;
 
 static const token *peek(const parser_state *p)
@@ -75,10 +77,11 @@ static const char *token_text(token_type t)
     return "?";
 }
  
-static char *unexpected_token_error(token_type t)
+static char *unexpected_token_error(const token *t)
 {
-    char buf[64];
-    snprintf(buf, sizeof buf, "unexpected token '%s'", token_text(t));
+    char buf[96];
+    const char *shown = (t->type == TOK_WORD) ? t->text : token_text(t->type);
+    snprintf(buf, sizeof buf, "unexpected token '%.40s'", shown);
     return make_error(buf);
 }
 
@@ -131,7 +134,7 @@ static bool parse_redirection(parser_state *p, redirection *out, char **error)
     advance(p);
 
     if (peek(p)->type != TOK_WORD) {
-        *error = make_error("expected a word after redirection operator");
+        *error = unexpected_token_error(peek(p));
         return false;
     }
 
@@ -360,8 +363,12 @@ void ast_list_dump(const ast_list *list, FILE *out)
 static bool parse_command(parser_state *p, command *out, char **error)
 {
     if (peek(p)->type == TOK_LPAREN) {
-        *error = make_error("subshells are not supported yet");
-        return false;
+        subshell_command sub;
+        if (!parse_subshell(p, &sub, error))
+            return false;
+        out->type = CMD_SUBSHELL;
+        out->as.subshell = sub;
+        return true;
     }
  
     simple_command simple;
@@ -538,9 +545,68 @@ fail:
     return false;
 }
 
+static bool parse_subshell(parser_state *p, subshell_command *out, char **error)
+{
+    redir_vec redirs = { .data = NULL, .count = 0, .cap = 0 };
+    ast_list *body = NULL;
+
+    if (p->depth >= MAX_NEST_DEPTH) {
+        *error = make_error("nesting too deep");
+        return false;
+    }
+    p->depth++;
+    advance(p);
+    skip_newlines(p);
+
+    body = malloc(sizeof *body);
+    if (body == NULL) {
+        *error = NULL;
+        goto fail;
+    }
+    *body = (ast_list){ .items = NULL, .seps = NULL, .count = 0 }; 
+    if (!parse_list(p, body, error))
+        goto fail;
+
+    if (peek(p)->type != TOK_RPAREN) {
+        if (peek(p)->type == TOK_EOF)
+            *error = make_error("expected ')' before end of input");
+        else
+            *error = unexpected_token_error(peek(p));
+        goto fail;
+    }
+    advance(p);
+
+    while (at_redirection(p)) {
+        redirection r;
+        if (!parse_redirection(p, &r, error))
+            goto fail;
+        if (!redir_vec_push(&redirs, r)) {
+            free(r.file);
+            *error = NULL;
+            goto fail;
+        }
+    }
+
+    p->depth--; 
+    out->body = body;
+    out->redirs = redirs.data;
+    out->redirs_count = redirs.count;
+    return true;
+
+fail:
+    if (body != NULL) {
+        ast_list_free(body);
+        free(body);
+    }
+    for (size_t i = 0; i < redirs.count; i++)
+        free(redirs.data[i].file);
+    free(redirs.data);
+    return false;
+}
+
 parse_status parse(const token_list *tokens, ast_list *out, char **error)
 {
-    parser_state state = { .items = tokens->items, .count = tokens->count, .pos = 0 };
+    parser_state state = { .items = tokens->items, .count = tokens->count, .pos = 0, .depth = 0};
  
     skip_newlines(&state);
     if (peek(&state)->type == TOK_EOF) {
@@ -553,7 +619,7 @@ parse_status parse(const token_list *tokens, ast_list *out, char **error)
         return *error == NULL ? PARSE_NOMEM : PARSE_SYNTAX_ERROR;
  
     if (peek(&state)->type != TOK_EOF) {
-        char *msg = unexpected_token_error(peek(&state)->type);
+        char *msg = unexpected_token_error(peek(&state));
         ast_list_free(&list);
         if (msg == NULL)
             return PARSE_NOMEM;
