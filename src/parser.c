@@ -13,6 +13,7 @@ parser.c - синтаксический анализ
 #define REDIR_INIT 4 // начальная ёмкость временного массива redirs, штук
 #define PIPELINE_CMDS_INIT 2 // начальная ёмкость временного массива команд в конвейере, штук
 #define AND_OR_INIT 2 // начальная ёмкость временных массивов в parse_and_or, штук
+#define LIST_INIT 2 // начальная ёмкость временных массивов в parse_list, штук 
 
 typedef struct {
     const token *items;
@@ -52,6 +53,33 @@ static char *make_error(const char *text)
     memcpy(msg, prefix, strlen(prefix));
     memcpy(msg + strlen(prefix), text, strlen(text) + 1);
     return msg;
+}
+
+static const char *token_text(token_type t)
+{
+    switch (t) {
+    case TOK_WORD:    return "word";
+    case TOK_PIPE:    return "|";
+    case TOK_AMP:     return "&";
+    case TOK_SEMI:    return ";";
+    case TOK_AND_IF:  return "&&";
+    case TOK_OR_IF:   return "||";
+    case TOK_LPAREN:  return "(";
+    case TOK_RPAREN:  return ")";
+    case TOK_LESS:    return "<";
+    case TOK_GREAT:   return ">";
+    case TOK_DGREAT:  return ">>";
+    case TOK_NEWLINE: return "newline";
+    case TOK_EOF:     return "end of input";
+    }
+    return "?";
+}
+ 
+static char *unexpected_token_error(token_type t)
+{
+    char buf[64];
+    snprintf(buf, sizeof buf, "unexpected token '%s'", token_text(t));
+    return make_error(buf);
 }
 
 typedef struct { char **data; size_t count; size_t cap; } str_vec;
@@ -193,7 +221,7 @@ static void command_free(command *cmd)
     if (cmd->type == CMD_SIMPLE) {
         simple_command_free(&cmd->as.simple);
     } else {
-        ast_list_free(cmd->as.subshell.body);
+        ast_list_free_contents(cmd->as.subshell.body);
         free(cmd->as.subshell.body);
         for (size_t i = 0; i < cmd->as.subshell.redirs_count; i++)
             free(cmd->as.subshell.redirs[i].file);
@@ -322,6 +350,10 @@ static void ast_list_dump_at(const ast_list *list, FILE *out, int depth)
 
 void ast_list_dump(const ast_list *list, FILE *out)
 {
+    if (list->count == 0) {
+    fprintf(out, "(empty)\n");
+    return;
+    }
     ast_list_dump_at(list, out, 0);
 }
 
@@ -432,42 +464,103 @@ fail:
     return false;
 }
 
+static bool at_list_end(const parser_state *p)
+{
+    token_type t = peek(p)->type;
+    return t == TOK_EOF || t == TOK_RPAREN;
+}
+
+static void skip_newlines(parser_state *p)
+{
+    while (peek(p)->type == TOK_NEWLINE)
+        advance(p);
+}
+
+static bool parse_list(parser_state *p, ast_list *out, char **error)
+{
+    and_or *items = NULL;
+    list_sep *seps = NULL;
+    size_t count = 0, cap = 0;
+ 
+    for (;;) {
+        and_or ao;
+        if (!parse_and_or(p, &ao, error))
+            goto fail;
+ 
+        if (count == cap) {
+            size_t new_cap = cap ? cap * 2 : LIST_INIT;
+            and_or *ni = realloc(items, new_cap * sizeof *ni);
+            if (ni == NULL) {
+                and_or_free(&ao);
+                *error = NULL;
+                goto fail;
+            }
+            items = ni;
+            list_sep *ns = realloc(seps, new_cap * sizeof *ns);
+            if (ns == NULL) {
+                and_or_free(&ao);
+                *error = NULL;
+                goto fail;
+            }
+            seps = ns;
+            cap = new_cap;
+        }
+        items[count] = ao;
+
+        list_sep sep = SEP_NONE;
+        token_type t = peek(p)->type;
+        if (t == TOK_SEMI || t == TOK_AMP) {
+            sep = (t == TOK_SEMI) ? SEP_SEQ : SEP_BG;
+            advance(p);
+            skip_newlines(p);
+        } else if (t == TOK_NEWLINE) {
+            skip_newlines(p);
+            if (!at_list_end(p))
+                sep = SEP_SEQ;
+        }
+        seps[count] = sep;
+        count++;
+ 
+        if (sep == SEP_NONE || at_list_end(p))
+            break;
+    }
+ 
+    out->items = items;
+    out->seps = seps;
+    out->count = count;
+    return true;
+ 
+fail:
+    for (size_t i = 0; i < count; i++)
+        and_or_free(&items[i]);
+    free(items);
+    free(seps);
+    return false;
+}
+
 parse_status parse(const token_list *tokens, ast_list *out, char **error)
 {
     parser_state state = { .items = tokens->items, .count = tokens->count, .pos = 0 };
-
-    pipeline pl;
-    if (!parse_pipeline(&state, &pl, error))
-        return *error == NULL ? PARSE_NOMEM : PARSE_SYNTAX_ERROR;
-
-    pipeline *pipelines = malloc(sizeof *pipelines);
-    and_or *items = malloc(sizeof *items);
-    list_sep *seps = malloc(sizeof *seps);
-    if (pipelines == NULL || items == NULL || seps == NULL) {
-        free(pipelines); free(items); free(seps);
-        pipeline_free(&pl);
-        return PARSE_NOMEM;
+ 
+    skip_newlines(&state);
+    if (peek(&state)->type == TOK_EOF) {
+        *out = (ast_list){ .items = NULL, .seps = NULL, .count = 0 };
+        return PARSE_OK;
     }
  
-    pipelines[0] = pl;
-    items[0] = (and_or){ .pipelines = pipelines, .ops = NULL, .count = 1 };
-    seps[0] = SEP_NONE;
+    ast_list list;
+    if (!parse_list(&state, &list, error))
+        return *error == NULL ? PARSE_NOMEM : PARSE_SYNTAX_ERROR;
  
-    if (peek(&state)->type == TOK_NEWLINE)
-        advance(&state);
     if (peek(&state)->type != TOK_EOF) {
-        and_or_free(&items[0]);
-        free(items);
-        free(seps);
-        char *msg = make_error("unexpected token (lists and subshells are not supported yet)");
+        char *msg = unexpected_token_error(peek(&state)->type);
+        ast_list_free(&list);
         if (msg == NULL)
             return PARSE_NOMEM;
         *error = msg;
         return PARSE_SYNTAX_ERROR;
     }
  
-    out->items = items;
-    out->seps = seps;
-    out->count = 1;
+    *out = list;
     return PARSE_OK;
 }
