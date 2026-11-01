@@ -9,626 +9,242 @@ parser.c - синтаксический анализ
 #include <stdlib.h>
 #include <string.h>
 
-#define ARGV_INIT  8 // начальная ёмкость временного массива слов, штук 
-#define REDIR_INIT 4 // начальная ёмкость временного массива redirs, штук
-#define PIPELINE_CMDS_INIT 2 // начальная ёмкость временного массива команд в конвейере, штук
-#define AND_OR_INIT 2 // начальная ёмкость временных массивов в parse_and_or, штук
-#define LIST_INIT 2 // начальная ёмкость временных массивов в parse_list, штук 
-#define MAX_NEST_DEPTH 1000 // максимум вложенных скобок: защита стека от патологического ввода
+#define MSG_SIZE 96 // Максимальная длина сообщения об ошибке
+#define MAX_NEST_DEPTH 1000 // Максимальная глубина вложенности скобок
 
 typedef struct {
-    const token *items;
-    size_t count;
-    size_t pos;
-    int depth;
+    const token *tok; // Указатель на текущий токен
+    int depth; // Глубина вложенности скобок
+    ast_block **mem; // Куда складывается вся выделенная память дерева
+    const char *err; // Сообщение об ошибке
+    char msg[MSG_SIZE]; // Буфер для сообщения об ошибке
 } parser_state;
 
-static const token *peek(const parser_state *p)
-{
-    return &p->items[p->pos];
-}
+static const char *const TOKEN_TEXT[] = {
+    [TOK_PIPE] = "|",
+    [TOK_AMP] = "&",
+    [TOK_SEMI] = ";",
+    [TOK_AND_IF] = "&&",
+    [TOK_OR_IF] = "||", 
+    [TOK_LPAREN] = "(", 
+    [TOK_RPAREN] = ")", 
+    [TOK_LESS] = "<",
+    [TOK_GREAT] = ">", 
+    [TOK_DGREAT] = ">>", 
+    [TOK_NEWLINE] = "newline",
+    [TOK_EOF] = "end of input"
+};
 
-static void advance(parser_state *p)
+static void next(parser_state *p)
 {
-    if (p->pos + 1 < p->count)
-        p->pos++;
-}
-
-
-static char *dup_str(const char *s)
-{
-    size_t len = strlen(s);
-    char *copy = malloc(len + 1);
-    if (copy == NULL)
-        return NULL;
-    memcpy(copy, s, len + 1);
-    return copy;
-}
-
-static char *make_error(const char *text)
-{
-    const char *prefix = "syntax error: ";
-    size_t len = strlen(prefix) + strlen(text);
-    char *msg = malloc(len + 1);
-    if (msg == NULL)
-        return NULL;
-    memcpy(msg, prefix, strlen(prefix));
-    memcpy(msg + strlen(prefix), text, strlen(text) + 1);
-    return msg;
-}
-
-static const char *token_text(token_type t)
-{
-    switch (t) {
-    case TOK_WORD:    return "word";
-    case TOK_PIPE:    return "|";
-    case TOK_AMP:     return "&";
-    case TOK_SEMI:    return ";";
-    case TOK_AND_IF:  return "&&";
-    case TOK_OR_IF:   return "||";
-    case TOK_LPAREN:  return "(";
-    case TOK_RPAREN:  return ")";
-    case TOK_LESS:    return "<";
-    case TOK_GREAT:   return ">";
-    case TOK_DGREAT:  return ">>";
-    case TOK_NEWLINE: return "newline";
-    case TOK_EOF:     return "end of input";
-    }
-    return "?";
+    if (p->tok->type != TOK_EOF) 
+        p->tok++;
 }
  
-static char *unexpected_token_error(const token *t)
+static bool fail(parser_state *p, const char *msg)
 {
-    char buf[96];
-    const char *shown = (t->type == TOK_WORD) ? t->text : token_text(t->type);
-    snprintf(buf, sizeof buf, "unexpected token '%.40s'", shown);
-    return make_error(buf);
+    p->err = msg;
+    return false;
 }
 
-typedef struct { char **data; size_t count; size_t cap; } str_vec;
-
-static bool str_vec_push(str_vec *v, char *s)
+static bool unexpected(parser_state *p)
 {
-    if (v->count == v->cap) {
-        size_t new_cap = v->cap ? v->cap * 2 : ARGV_INIT;
-        char **p = realloc(v->data, new_cap * sizeof *p);
-        if (p == NULL)
-            return false;
-        v->data = p;
-        v->cap = new_cap;
-    }
-    v->data[v->count++] = s;
-    return true;
+    const char *shown = p->tok->type == TOK_WORD ? p->tok->text : TOKEN_TEXT[p->tok->type];
+ 
+    snprintf(p->msg, sizeof p->msg, "syntax error: unexpected token '%.40s'", shown);
+    return fail(p, p->msg);
 }
-
-typedef struct { redirection *data; size_t count; size_t cap; } redir_vec;
-
-static bool redir_vec_push(redir_vec *v, redirection r)
+ 
+static bool is_redir(token_type t)
 {
-    if (v->count == v->cap) {
-        size_t new_cap = v->cap ? v->cap * 2 : REDIR_INIT;
-        redirection *p = realloc(v->data, new_cap * sizeof *p);
-        if (p == NULL)
-            return false;
-        v->data = p;
-        v->cap = new_cap;
-    }
-    v->data[v->count++] = r;
-    return true;
-}
-
-static bool at_redirection(const parser_state *p)
-{
-    token_type t = peek(p)->type;
     return t == TOK_LESS || t == TOK_GREAT || t == TOK_DGREAT;
 }
-
-static bool parse_redirection(parser_state *p, redirection *out, char **error)
-{
-    redir_op op;
-    switch (peek(p)->type) {
-    case TOK_LESS:   op = REDIR_IN;     break;
-    case TOK_GREAT:  op = REDIR_OUT;    break;
-    default:         op = REDIR_APPEND; break;
-    }
-    advance(p);
-
-    if (peek(p)->type != TOK_WORD) {
-        *error = unexpected_token_error(peek(p));
-        return false;
-    }
-
-    char *file = dup_str(peek(p)->text);
-    if (file == NULL) {
-        *error = NULL;
-        return false;
-    }
-    advance(p);
-
-    out->op = op;
-    out->file = file;
-    return true;
-}
-
-static void simple_command_free(simple_command *cmd)
-{
-    for (size_t i = 0; i < cmd->argv_count; i++)
-        free(cmd->argv[i]);
-    free(cmd->argv);
-    for (size_t i = 0; i < cmd->redirs_count; i++)
-        free(cmd->redirs[i].file);
-    free(cmd->redirs);
-}
-
-static bool parse_simple(parser_state *p, simple_command *out, char **error)
-{
-    str_vec words = { .data = NULL, .count = 0, .cap = 0 };
-    redir_vec redirs = { .data = NULL, .count = 0, .cap = 0 };
-
-    for (;;) {
-        if (at_redirection(p)) {
-            redirection r;
-            if (!parse_redirection(p, &r, error))
-                goto fail;
-            if (!redir_vec_push(&redirs, r)) {
-                free(r.file);
-                *error = NULL;
-                goto fail;
-            }
-            continue;
-        }
-
-        if (peek(p)->type == TOK_WORD) {
-            char *w = dup_str(peek(p)->text);
-            if (w == NULL) {
-                *error = NULL;
-                goto fail;
-            }
-            if (!str_vec_push(&words, w)) {
-                free(w);
-                *error = NULL;
-                goto fail;
-            }
-            advance(p);
-            continue;
-        }
-
-        break;
-    }
-
-    if (words.count == 0) {
-        *error = make_error("expected a command name");
-        goto fail;
-    }
-
-    out->argv = words.data;
-    out->argv_count = words.count;
-    out->redirs = redirs.data;
-    out->redirs_count = redirs.count;
-    return true;
-
-fail:
-    for (size_t i = 0; i < words.count; i++)
-        free(words.data[i]);
-    free(words.data);
-    for (size_t i = 0; i < redirs.count; i++)
-        free(redirs.data[i].file);
-    free(redirs.data);
-    return false;
-}
-
-static void ast_list_free_contents(ast_list *list);
-
-static void command_free(command *cmd)
-{
-    if (cmd->type == CMD_SIMPLE) {
-        simple_command_free(&cmd->as.simple);
-    } else {
-        ast_list_free_contents(cmd->as.subshell.body);
-        free(cmd->as.subshell.body);
-        for (size_t i = 0; i < cmd->as.subshell.redirs_count; i++)
-            free(cmd->as.subshell.redirs[i].file);
-        free(cmd->as.subshell.redirs);
-    }
-}
-
-static void pipeline_free(pipeline *pl)
-{
-    for (size_t i = 0; i < pl->count; i++)
-        command_free(&pl->commands[i]);
-    free(pl->commands);
-}
-
-static void and_or_free(and_or *ao)
-{
-    for (size_t i = 0; i < ao->count; i++)
-        pipeline_free(&ao->pipelines[i]);
-    free(ao->pipelines);
-    free(ao->ops);
-}
-
-static void ast_list_free_contents(ast_list *list)
-{
-    for (size_t i = 0; i < list->count; i++)
-        and_or_free(&list->items[i]);
-    free(list->items);
-    free(list->seps);
-}
-
-void ast_list_free(ast_list *list)
-{
-    ast_list_free_contents(list);
-    list->items = NULL;
-    list->seps = NULL;
-    list->count = 0;
-}
-
-
-static void print_indent(FILE *out, int depth)
-{
-    fprintf(out, "%*s", depth * 2, "");
-}
-
-static const char *redir_symbol(redir_op op)
-{
-    switch (op) {
-    case REDIR_IN:     return "<";
-    case REDIR_OUT:    return ">";
-    default:           return ">>";
-    }
-}
-
-static void simple_command_dump(const simple_command *s, FILE *out, int depth)
-{
-    print_indent(out, depth);
-    fprintf(out, "SIMPLE argv=[");
-    for (size_t i = 0; i < s->argv_count; i++)
-        fprintf(out, "%s%s", i ? " " : "", s->argv[i]);
-    fprintf(out, "]");
-    for (size_t i = 0; i < s->redirs_count; i++)
-        fprintf(out, " %s%s", redir_symbol(s->redirs[i].op), s->redirs[i].file);
-    fprintf(out, "\n");
-}
-
-static void ast_list_dump_at(const ast_list *list, FILE *out, int depth);
-
-static void command_dump(const command *cmd, FILE *out, int depth)
-{
-    if (cmd->type == CMD_SIMPLE) {
-        simple_command_dump(&cmd->as.simple, out, depth);
-        return;
-    }
-    print_indent(out, depth);
-    fprintf(out, "SUBSHELL\n");
-    ast_list_dump_at(cmd->as.subshell.body, out, depth + 1);
-    for (size_t i = 0; i < cmd->as.subshell.redirs_count; i++) {
-        print_indent(out, depth + 1);
-        fprintf(out, "REDIR %s%s\n", redir_symbol(cmd->as.subshell.redirs[i].op),
-                cmd->as.subshell.redirs[i].file);
-    }
-}
-
-static void pipeline_dump(const pipeline *pl, FILE *out, int depth)
-{
-    if (pl->count == 1) {
-        command_dump(&pl->commands[0], out, depth);
-        return;
-    }
-    print_indent(out, depth);
-    fprintf(out, "PIPELINE\n");
-    for (size_t i = 0; i < pl->count; i++)
-        command_dump(&pl->commands[i], out, depth + 1);
-}
-
-static void and_or_dump(const and_or *ao, FILE *out, int depth)
-{
-    if (ao->count == 1) {
-        pipeline_dump(&ao->pipelines[0], out, depth);
-        return;
-    }
-    print_indent(out, depth);
-    fprintf(out, "AND_OR\n");
-    for (size_t i = 0; i < ao->count; i++) {
-        pipeline_dump(&ao->pipelines[i], out, depth + 1);
-        if (i + 1 < ao->count) {
-            print_indent(out, depth + 1);
-            fprintf(out, "%s\n", ao->ops[i] == AND_IF_OP ? "&&" : "||");
-        }
-    }
-}
-
-static void ast_list_dump_at(const ast_list *list, FILE *out, int depth)
-{
-    for (size_t i = 0; i < list->count; i++) {
-        and_or_dump(&list->items[i], out, depth);
-        if (list->seps[i] == SEP_SEQ) {
-            print_indent(out, depth);
-            fprintf(out, ";\n");
-        } else if (list->seps[i] == SEP_BG) {
-            print_indent(out, depth);
-            fprintf(out, "&\n");
-        }
-    }
-}
-
-void ast_list_dump(const ast_list *list, FILE *out)
-{
-    if (list->count == 0) {
-    fprintf(out, "(empty)\n");
-    return;
-    }
-    ast_list_dump_at(list, out, 0);
-}
-
-static bool parse_subshell(parser_state *p, subshell_command *out, char **error);
-
-static bool parse_command(parser_state *p, command *out, char **error)
-{
-    if (peek(p)->type == TOK_LPAREN) {
-        subshell_command sub;
-        if (!parse_subshell(p, &sub, error))
-            return false;
-        out->type = CMD_SUBSHELL;
-        out->as.subshell = sub;
-        return true;
-    }
  
-    simple_command simple;
-    if (!parse_simple(p, &simple, error))
-        return false;
- 
-    out->type = CMD_SIMPLE;
-    out->as.simple = simple;
-    return true;
-}
-
-static bool parse_pipeline(parser_state *p, pipeline *out, char **error)
+static void skip_newlines(parser_state *p)
 {
-    command *data = NULL;
-    size_t count = 0, cap = 0;
- 
-    for (;;) {
-        command cmd;
-        if (!parse_command(p, &cmd, error))
-            goto fail;
- 
-        if (count == cap) {
-            size_t new_cap = cap ? cap * 2 : PIPELINE_CMDS_INIT;
-            command *np = realloc(data, new_cap * sizeof *np);
-            if (np == NULL) {
-                command_free(&cmd);
-                *error = NULL;
-                goto fail;
-            }
-            data = np;
-            cap = new_cap;
-        }
-        data[count++] = cmd;
- 
-        if (peek(p)->type != TOK_PIPE)
-            break;
-        advance(p); 
-    }
- 
-    out->commands = data;
-    out->count = count;
-    return true;
- 
-fail:
-    for (size_t i = 0; i < count; i++)
-        command_free(&data[i]);
-    free(data);
-    return false;
-}
-
-static bool parse_and_or(parser_state *p, and_or *out, char **error)
-{
-    pipeline *pipelines = NULL;
-    and_or_op *ops = NULL;
-    size_t count = 0, cap = 0;
- 
-    for (;;) {
-        pipeline pl;
-        if (!parse_pipeline(p, &pl, error))
-            goto fail;
- 
-        if (count == cap) {
-            size_t new_cap = cap ? cap * 2 : AND_OR_INIT;
-            pipeline *np = realloc(pipelines, new_cap * sizeof *np);
-            if (np == NULL) {
-                pipeline_free(&pl);
-                *error = NULL;
-                goto fail;
-            }
-            pipelines = np;
-            and_or_op *nop = realloc(ops, new_cap * sizeof *nop);
-            if (nop == NULL) {
-                pipeline_free(&pl);
-                *error = NULL;
-                goto fail;
-            }
-            ops = nop;
-            cap = new_cap;
-        }
-        pipelines[count] = pl;
-        count++;
- 
-        token_type t = peek(p)->type;
-        if (t != TOK_AND_IF && t != TOK_OR_IF)
-            break;
-        ops[count - 1] = (t == TOK_AND_IF) ? AND_IF_OP : OR_IF_OP;
-        advance(p);
-    }
- 
-    out->pipelines = pipelines;
-    out->ops = ops;
-    out->count = count;
-    return true;
- 
-fail:
-    for (size_t i = 0; i < count; i++)
-        pipeline_free(&pipelines[i]);
-    free(pipelines);
-    free(ops);
-    return false;
+    while (p->tok->type == TOK_NEWLINE)
+        next(p);
 }
 
 static bool at_list_end(const parser_state *p)
 {
-    token_type t = peek(p)->type;
-    return t == TOK_EOF || t == TOK_RPAREN;
+    return p->tok->type == TOK_EOF || p->tok->type == TOK_RPAREN;
+}
+ 
+static bool parse_redirection(parser_state *p, ast_vec *redirs)
+{
+    token_type t = p->tok->type;
+    redirection *r = ast_vec_add(p->mem, redirs, sizeof *r);
+ 
+    if (r == NULL)
+        return false;
+    r->op = t == TOK_LESS ? REDIR_IN : t == TOK_GREAT ? REDIR_OUT : REDIR_APPEND;
+    next(p);
+    if (p->tok->type != TOK_WORD)
+        return fail(p, "syntax error: expected a word after redirection operator");
+    r->file = ast_strdup(p->mem, p->tok->text);
+    next(p);
+    return r->file != NULL;
 }
 
-static void skip_newlines(parser_state *p)
+static bool parse_simple(parser_state *p, simple_command *s)
 {
-    while (peek(p)->type == TOK_NEWLINE)
-        advance(p);
-}
-
-static bool parse_list(parser_state *p, ast_list *out, char **error)
-{
-    and_or *items = NULL;
-    list_sep *seps = NULL;
-    size_t count = 0, cap = 0;
+    ast_vec words = { 0 }, redirs = { 0 };
  
     for (;;) {
-        and_or ao;
-        if (!parse_and_or(p, &ao, error))
-            goto fail;
+        if (is_redir(p->tok->type)) {
+            if (!parse_redirection(p, &redirs))
+                return false;
+        } else if (p->tok->type == TOK_WORD) {
+            char **w = ast_vec_add(p->mem, &words, sizeof *w);
  
-        if (count == cap) {
-            size_t new_cap = cap ? cap * 2 : LIST_INIT;
-            and_or *ni = realloc(items, new_cap * sizeof *ni);
-            if (ni == NULL) {
-                and_or_free(&ao);
-                *error = NULL;
-                goto fail;
-            }
-            items = ni;
-            list_sep *ns = realloc(seps, new_cap * sizeof *ns);
-            if (ns == NULL) {
-                and_or_free(&ao);
-                *error = NULL;
-                goto fail;
-            }
-            seps = ns;
-            cap = new_cap;
+            if (w == NULL || (*w = ast_strdup(p->mem, p->tok->text)) == NULL)
+                return false;
+            next(p);
+        } else {
+            break;
         }
-        items[count] = ao;
+    }
+    if (words.n == 0) 
+        return fail(p, "syntax error: expected a command name");
+    *s = (simple_command){ words.data, words.n, redirs.data, redirs.n };
+    return true;
+}
 
-        list_sep sep = SEP_NONE;
-        token_type t = peek(p)->type;
+static bool parse_list(parser_state *p, ast_list *l);
+
+static bool parse_subshell(parser_state *p, subshell_command *s)
+{
+    ast_vec redirs = { 0 };
+ 
+    if (p->depth >= MAX_NEST_DEPTH)
+        return fail(p, "syntax error: nesting too deep");
+    p->depth++;
+    next(p);
+    skip_newlines(p);
+    s->body = ast_alloc(p->mem, sizeof *s->body);
+    if (s->body == NULL || !parse_list(p, s->body))
+        return false;
+    if (p->tok->type != TOK_RPAREN)
+        return p->tok->type == TOK_EOF
+            ? fail(p, "syntax error: expected ')' before end of input")
+            : unexpected(p);
+    next(p); 
+    while (is_redir(p->tok->type))
+        if (!parse_redirection(p, &redirs))
+            return false;
+    p->depth--;
+    s->redirs = redirs.data;
+    s->redirs_count = redirs.n;
+    return true;
+}
+
+static bool parse_command(parser_state *p, command *c)
+{
+    if (p->tok->type == TOK_LPAREN) {
+        c->type = CMD_SUBSHELL;
+        return parse_subshell(p, &c->as.subshell);
+    }
+    c->type = CMD_SIMPLE;
+    return parse_simple(p, &c->as.simple);
+}
+
+static bool parse_pipeline(parser_state *p, pipeline *pl)
+{
+    ast_vec cmds = { 0 };
+ 
+    for (;;) {
+        command *c = ast_vec_add(p->mem, &cmds, sizeof *c);
+ 
+        if (c == NULL || !parse_command(p, c))
+            return false;
+        if (p->tok->type != TOK_PIPE)
+            break;
+        next(p);
+    }
+    *pl = (pipeline){ cmds.data, cmds.n };
+    return true;
+}
+
+static bool parse_and_or(parser_state *p, and_or *ao)
+{
+    ast_vec pls = { 0 }, ops = { 0 };
+ 
+    for (;;) {
+        pipeline *pl = ast_vec_add(p->mem, &pls, sizeof *pl);
+        token_type t;
+ 
+        if (pl == NULL || !parse_pipeline(p, pl))
+            return false;
+        t = p->tok->type;
+        if (t != TOK_AND_IF && t != TOK_OR_IF)
+            break;
+        and_or_op *op = ast_vec_add(p->mem, &ops, sizeof *op);
+ 
+        if (op == NULL)
+            return false;
+        *op = t == TOK_AND_IF ? AND_IF_OP : OR_IF_OP;
+        next(p);
+    }
+    *ao = (and_or){ pls.data, ops.data, pls.n };
+    return true;
+}
+
+static bool parse_list(parser_state *p, ast_list *l)
+{
+    ast_vec items = { 0 }, seps = { 0 };
+ 
+    for (;;) {
+        and_or *ao = ast_vec_add(p->mem, &items, sizeof *ao);
+        list_sep *sep = ast_vec_add(p->mem, &seps, sizeof *sep);
+        token_type t;
+ 
+        if (ao == NULL || sep == NULL || !parse_and_or(p, ao))
+            return false;
+        t = p->tok->type;
+        *sep = SEP_NONE;
         if (t == TOK_SEMI || t == TOK_AMP) {
-            sep = (t == TOK_SEMI) ? SEP_SEQ : SEP_BG;
-            advance(p);
+            *sep = t == TOK_SEMI ? SEP_SEQ : SEP_BG;
+            next(p);
             skip_newlines(p);
         } else if (t == TOK_NEWLINE) {
             skip_newlines(p);
-            if (!at_list_end(p))
-                sep = SEP_SEQ;
+            if (!at_list_end(p)) 
+                *sep = SEP_SEQ;
         }
-        seps[count] = sep;
-        count++;
- 
-        if (sep == SEP_NONE || at_list_end(p))
+
+        if (*sep == SEP_NONE || at_list_end(p))
             break;
     }
- 
-    out->items = items;
-    out->seps = seps;
-    out->count = count;
+    *l = (ast_list){ .items = items.data, .seps = seps.data, .count = items.n };
     return true;
- 
-fail:
-    for (size_t i = 0; i < count; i++)
-        and_or_free(&items[i]);
-    free(items);
-    free(seps);
-    return false;
 }
 
-static bool parse_subshell(parser_state *p, subshell_command *out, char **error)
-{
-    redir_vec redirs = { .data = NULL, .count = 0, .cap = 0 };
-    ast_list *body = NULL;
-
-    if (p->depth >= MAX_NEST_DEPTH) {
-        *error = make_error("nesting too deep");
-        return false;
-    }
-    p->depth++;
-    advance(p);
-    skip_newlines(p);
-
-    body = malloc(sizeof *body);
-    if (body == NULL) {
-        *error = NULL;
-        goto fail;
-    }
-    *body = (ast_list){ .items = NULL, .seps = NULL, .count = 0 }; 
-    if (!parse_list(p, body, error))
-        goto fail;
-
-    if (peek(p)->type != TOK_RPAREN) {
-        if (peek(p)->type == TOK_EOF)
-            *error = make_error("expected ')' before end of input");
-        else
-            *error = unexpected_token_error(peek(p));
-        goto fail;
-    }
-    advance(p);
-
-    while (at_redirection(p)) {
-        redirection r;
-        if (!parse_redirection(p, &r, error))
-            goto fail;
-        if (!redir_vec_push(&redirs, r)) {
-            free(r.file);
-            *error = NULL;
-            goto fail;
-        }
-    }
-
-    p->depth--; 
-    out->body = body;
-    out->redirs = redirs.data;
-    out->redirs_count = redirs.count;
-    return true;
-
-fail:
-    if (body != NULL) {
-        ast_list_free(body);
-        free(body);
-    }
-    for (size_t i = 0; i < redirs.count; i++)
-        free(redirs.data[i].file);
-    free(redirs.data);
-    return false;
-}
 
 parse_status parse(const token_list *tokens, ast_list *out, char **error)
 {
-    parser_state state = { .items = tokens->items, .count = tokens->count, .pos = 0, .depth = 0};
+    ast_block *mem = NULL;
+    parser_state p = { .tok = tokens->items, .mem = &mem };
+    ast_list list = { 0 };
+    bool ok = true;
+    char *msg;
  
-    skip_newlines(&state);
-    if (peek(&state)->type == TOK_EOF) {
-        *out = (ast_list){ .items = NULL, .seps = NULL, .count = 0 };
+    skip_newlines(&p);
+    if (p.tok->type != TOK_EOF) {
+        ok = parse_list(&p, &list);
+        if (ok && p.tok->type != TOK_EOF) 
+            ok = unexpected(&p);
+    }
+    if (ok) {
+        list.mem = mem;
+        *out = list; 
         return PARSE_OK;
     }
  
-    ast_list list;
-    if (!parse_list(&state, &list, error))
-        return *error == NULL ? PARSE_NOMEM : PARSE_SYNTAX_ERROR;
- 
-    if (peek(&state)->type != TOK_EOF) {
-        char *msg = unexpected_token_error(peek(&state));
-        ast_list_free(&list);
-        if (msg == NULL)
-            return PARSE_NOMEM;
-        *error = msg;
-        return PARSE_SYNTAX_ERROR;
-    }
- 
-    *out = list;
-    return PARSE_OK;
+    ast_list_free(&(ast_list){ .mem = mem });
+    if (p.err == NULL || (msg = malloc(strlen(p.err) + 1)) == NULL)
+        return PARSE_NOMEM;
+    strcpy(msg, p.err);
+    *error = msg;
+    return PARSE_SYNTAX_ERROR;
 }
