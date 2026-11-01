@@ -360,6 +360,8 @@ void ast_list_dump(const ast_list *list, FILE *out)
     ast_list_dump_at(list, out, 0);
 }
 
+static bool parse_subshell(parser_state *p, subshell_command *out, char **error);
+
 static bool parse_command(parser_state *p, command *out, char **error)
 {
     if (peek(p)->type == TOK_LPAREN) {
