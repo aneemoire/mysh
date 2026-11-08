@@ -1,0 +1,97 @@
+# Проверка "принято / отвергнуто" для --dump-ast -c.
+# Формат строки:  <метка> <команда>
+#   ok  — синтаксис верный, код возврата 0
+#   err — синтаксическая ошибка, код возврата 2
+#   dev — наша ошибка, где bash ведёт себя иначе
+# Для ok и err результат дополнительно сверяется с `bash -n`.
+
+# простая команда и перенаправления
+ok echo hi
+ok echo a b c
+ok echo a > out
+ok > out echo hi
+ok cat < in > out
+ok echo a >> log
+ok echo a > out1 b > out2 c
+ok < in >> log cmd
+
+# конвейеры
+ok echo a | wc
+ok a | b | c
+ok echo a > o | wc < i
+
+# && и ||
+ok a && b
+ok a || b
+ok a && b || c
+ok a | b && c
+
+# списки
+ok a ; b
+ok a & b
+ok a &
+ok a ;
+ok a ; b &
+ok a && b ; c | d &
+
+# подоболочки
+ok (echo a)
+ok (a; b) > out
+ok (a; b) | wc
+ok echo x | (cat; echo y)
+ok ((a))
+ok (a) && (b) ; c
+ok (a &)
+ok (a;)
+ok (a) &
+
+# кавычки, экранирование, комментарии
+ok echo "a b" 'c d'
+ok echo "" ''
+ok echo a\ b
+ok echo "a|b;c>d"
+ok echo a # comment
+ok echo a#b
+
+# пустой ввод
+ok
+ok    
+ok # только комментарий
+
+# ошибки: пропущена команда
+err echo a |
+err | echo a
+err echo a &&
+err && echo a
+err echo a ||
+err echo a | | b
+err echo a && | b
+
+# ошибки: разделители
+err echo a ; ; b
+err ; echo a
+err &
+err echo a & & b
+
+# ошибки: перенаправления
+err echo >
+err echo a > | wc
+err < 
+
+# ошибки: скобки
+err (echo a
+err echo a)
+err ()
+err ( )
+err (echo a) b
+err echo (a)
+err (a)(b)
+err )
+err (echo a > )
+
+# ошибки: кавычки (ловит лексер)
+err echo "abc
+err echo 'abc
+
+# наша ошибка, а bash принимает: \ в самом конце ввода 
+dev echo trailing\

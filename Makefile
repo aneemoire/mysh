@@ -17,6 +17,9 @@ debug: mysh-debug
 mysh-debug: $(SRC) $(HDR)
 	$(CC) -std=$(STD) $(WARN) -g -fsanitize=address,undefined $(CPPFLAGS) $(SRC) -o $@
 
+test: mysh
+	bash tests/run_tests.sh ./mysh
+	
 clean:
 	rm -f mysh mysh-debug
 

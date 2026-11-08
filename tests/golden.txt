@@ -1,0 +1,147 @@
+# Эталонные выводы --dump-tokens и --dump-ast.
+# Формат блока:
+#   === <имя> <режим>
+#   <команда, может занимать несколько строк>
+#   --- expected
+#   <ожидаемый вывод>
+
+=== tokens_operators --dump-tokens
+a&&b||c|d&e;(f)<g>>h
+--- expected
+WORD    [a]
+AND_IF  &&
+WORD    [b]
+OR_IF   ||
+WORD    [c]
+PIPE    |
+WORD    [d]
+AMP     &
+WORD    [e]
+SEMI    ;
+LPAREN  (
+WORD    [f]
+RPAREN  )
+LESS    <
+WORD    [g]
+DGREAT  >>
+WORD    [h]
+EOF
+
+=== tokens_quotes --dump-tokens
+echo "a  b" 'c|d' "" a"b c"d
+--- expected
+WORD    [echo]
+WORD    [a  b]
+WORD    [c|d]
+WORD    []
+WORD    [ab cd]
+EOF
+
+=== tokens_escapes --dump-tokens
+echo a\ b \| "q\"q" "a\tb" 'x\y'
+--- expected
+WORD    [echo]
+WORD    [a b]
+WORD    [|]
+WORD    [q"q]
+WORD    [a\tb]
+WORD    [x\y]
+EOF
+
+=== tokens_comments --dump-tokens
+echo a#b # comment
+--- expected
+WORD    [echo]
+WORD    [a#b]
+EOF
+
+=== tokens_newline --dump-tokens
+ls
+pwd
+--- expected
+WORD    [ls]
+NEWLINE \n
+WORD    [pwd]
+EOF
+
+=== ast_simple --dump-ast
+echo a > out1 b > out2 c
+--- expected
+SIMPLE argv=[echo a b c] >out1 >out2
+
+=== ast_redir_first --dump-ast
+> out echo hi
+--- expected
+SIMPLE argv=[echo hi] >out
+
+=== ast_pipeline --dump-ast
+cat f | grep x | wc -l
+--- expected
+PIPELINE
+  SIMPLE argv=[cat f]
+  SIMPLE argv=[grep x]
+  SIMPLE argv=[wc -l]
+
+=== ast_and_or --dump-ast
+a && b || c
+--- expected
+AND_OR
+  SIMPLE argv=[a]
+  &&
+  SIMPLE argv=[b]
+  ||
+  SIMPLE argv=[c]
+
+=== ast_list --dump-ast
+a ; b & c
+--- expected
+SIMPLE argv=[a]
+;
+SIMPLE argv=[b]
+&
+SIMPLE argv=[c]
+
+=== ast_subshell --dump-ast
+(echo a; echo b) > out | wc -l && echo done &
+--- expected
+AND_OR
+  PIPELINE
+    SUBSHELL
+      SIMPLE argv=[echo a]
+      ;
+      SIMPLE argv=[echo b]
+      REDIR >out
+    SIMPLE argv=[wc -l]
+  &&
+  SIMPLE argv=[echo done]
+&
+
+=== ast_nested --dump-ast
+((a; b) | c)
+--- expected
+SUBSHELL
+  PIPELINE
+    SUBSHELL
+      SIMPLE argv=[a]
+      ;
+      SIMPLE argv=[b]
+    SIMPLE argv=[c]
+
+=== ast_newlines --dump-ast
+echo a
+
+echo b
+--- expected
+SIMPLE argv=[echo a]
+;
+SIMPLE argv=[echo b]
+
+=== ast_empty --dump-ast
+   # ничего
+--- expected
+(empty)
+
+=== ast_error --dump-ast
+echo a | | b
+--- expected
+mysh: syntax error: expected a command name
