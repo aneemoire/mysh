@@ -6,11 +6,13 @@
 #          make test
 # Для проверки на утечки и ошибки памяти:  bash tests/run_tests.sh ./mysh-debug
 #
-# Три группы проверок:
+# Четыре группы проверок:
 #   1. syntax.txt  — «принято / отвергнуто» для --dump-ast -c (код 0 или 2),
 #                    результат сверяется ещё и с `bash -n`;
 #   2. многострочные команды — то же, но со значащими переводами строки;
 #   3. golden.txt  — точное сравнение вывода --dump-tokens и --dump-ast.
+#   4. выполнение  — `mysh -c` и `bash -c` на одних и тех же командах:
+#                    совпадают код возврата, stdout и текст ошибки.
 # Код возврата скрипта: 0 — всё прошло, 1 — есть провалы.
 
 MYSH=${1:-./mysh}
@@ -115,6 +117,64 @@ while IFS= read -r line || [ -n "$line" ]; do
     esac
 done < "$DIR/golden.txt"
 flush
+
+echo "== 4. выполнение команд: сверка с bash =="
+
+strip_prefix() { sed -E 's/^(bash|mysh): (line [0-9]+: )?//'; }
+ 
+check_run() {
+    local cmd=$1 brc mrc
+    local bout berr mout merr
+    bout=$(mktemp) berr=$(mktemp) mout=$(mktemp) merr=$(mktemp)
+ 
+    total=$((total + 1))
+
+    { bash -c "$cmd" >"$bout" 2>"$berr" </dev/null; } 2>/dev/null; brc=$?
+    { "$MYSH" -c "$cmd" >"$mout" 2>"$merr" </dev/null; } 2>/dev/null; mrc=$?
+    if [ "$brc" -ne "$mrc" ]; then
+        fail "код возврата: bash $brc, mysh $mrc: $(printf '%q' "$cmd")"
+    elif ! cmp -s "$bout" "$mout"; then
+        fail "stdout отличается от bash: $(printf '%q' "$cmd")"
+    elif [ "$(strip_prefix <"$berr")" != "$(strip_prefix <"$merr")" ]; then
+        fail "текст ошибки отличается от bash: $(printf '%q' "$cmd")"
+    fi
+    rm -f "$bout" "$berr" "$mout" "$merr"
+}
+ 
+check_run 'true'
+check_run 'false'
+check_run 'echo hello world'
+check_run "printf '%s|' 'a b' c"
+check_run '/bin/echo "a  b"'
+check_run 'echo'
+check_run ''
+check_run '# только комментарий'
+check_run "sh -c 'exit 3'"
+check_run "sh -c 'exit 255'"
+check_run "sh -c 'echo out; echo err >&2; exit 4'"
+check_run "sh -c 'kill -TERM \$\$'"               
+check_run "sh -c 'kill -KILL \$\$'"
+check_run 'ls /nonexistent_dir_xyz'
+check_run 'nosuchcmd_xyz'
+check_run '/nonexistent'
+check_run './nonexistent'
+check_run "''"
+check_run '/etc'
+check_run '/etc/passwd'
+check_run '/etc/passwd/x'
+ 
+total=$((total + 1))
+got=$(TEST_MYSH_VAR=значение "$MYSH" -c "sh -c 'echo \$TEST_MYSH_VAR'" </dev/null 2>&1)
+[ "$got" = "значение" ] || fail "окружение не передаётся дочернему процессу (получено '$got')"
+ 
+total=$((total + 1))
+got=$(printf 'привет\n' | "$MYSH" -c cat 2>&1)
+[ "$got" = "привет" ] || fail "stdin не передаётся дочернему процессу (получено '$got')"
+ 
+total=$((total + 1))
+args=$(seq 1 3000 | tr '\n' ' ')
+got=$("$MYSH" -c "printf '%s\n' $args" </dev/null 2>&1 | wc -l)
+[ "$got" -eq 3000 ] || fail "3000 аргументов: передано $got"
 
 echo
 echo "Проверок: $total, провалено: $failed"

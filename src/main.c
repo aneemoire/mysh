@@ -1,11 +1,12 @@
 /*
-    main.c — временная точка входа для проверки лексера.
+    main.c — временная точка входа для проверки лексера и парсера.
 
-    mysh --dump-tokens -c 'строка' 
-        разбить одну строку и вывести токены
-    mysh --dump-tokens    
-        читать команды из stdin и выводить токены
- */
+    mysh -c 'строка' выполнить одну строку
+    mysh --dump-tokens|--dump-ast -c 'строка' 
+        разбить одну строку и вывести результат
+    mysh --dump-tokens|--dump-ast    
+        читать команды из stdin и выводить результат
+*/
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -13,6 +14,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "executor.h"
 #include "lexer.h"
 #include "mysh_getline.h"
 #include "parser.h"
@@ -26,6 +28,38 @@ typedef enum {
 
 static const char *PROMPT_PRIMARY = "mysh> ";
 static const char *PROMPT_SECONDARY = "> ";
+
+// Выполняет одну строку: лексер -> парсер -> исполнитель. Возвращает код возврата. 
+
+static int run_string(const char *input)
+{
+    token_list tokens;
+    ast_list tree;
+    char *error = NULL;
+    lex_status lst = lex(input, &tokens);
+    int rc;
+ 
+    if (lst != LEX_OK) {
+        fprintf(stderr, "mysh: %s\n", lex_status_message(lst));
+        return lst == LEX_NOMEM ? 1 : EXIT_SYNTAX;
+    }
+    switch (parse(&tokens, &tree, &error)) {
+    case PARSE_OK:
+        rc = exec_list(&tree);
+        ast_list_free(&tree);
+        break;
+    case PARSE_SYNTAX_ERROR:
+        fprintf(stderr, "mysh: %s\n", error);
+        free(error);
+        rc = EXIT_SYNTAX;
+        break;
+    default:
+        fprintf(stderr, "mysh: out of memory\n");
+        rc = 1;
+    }
+    token_list_free(&tokens);
+    return rc;
+}
 
 // парсит tokens и печатает дерево команд. возвращает код возврата.
 
@@ -142,6 +176,10 @@ done:
 
 
 int main(int argc, char **argv) {
+
+    if (argc == 3 && strcmp(argv[1], "-c") == 0)
+        return run_string(argv[2]);
+        
     if (argc >= 2) {
         const bool tokens = strcmp(argv[1], "--dump-tokens") == 0;
 
