@@ -6,13 +6,15 @@
 #          make test
 # Для проверки на утечки и ошибки памяти:  bash tests/run_tests.sh ./mysh-debug
 #
-# Четыре группы проверок:
+# Пять групп проверок:
 #   1. syntax.txt  — «принято / отвергнуто» для --dump-ast -c (код 0 или 2),
 #                    результат сверяется ещё и с `bash -n`;
 #   2. многострочные команды — то же, но со значащими переводами строки;
 #   3. golden.txt  — точное сравнение вывода --dump-tokens и --dump-ast.
 #   4. выполнение  — `mysh -c` и `bash -c` на одних и тех же командах:
 #                    совпадают код возврата, stdout и текст ошибки.
+#   5. скрипты на stdin — `mysh < ввод` и `bash < ввод`: код возврата и stdout.
+# Интерактивный режим (приглашения, Ctrl-D) автоматически не проверяется
 # Код возврата скрипта: 0 — всё прошло, 1 — есть провалы.
 
 MYSH=${1:-./mysh}
@@ -175,6 +177,41 @@ total=$((total + 1))
 args=$(seq 1 3000 | tr '\n' ' ')
 got=$("$MYSH" -c "printf '%s\n' $args" </dev/null 2>&1 | wc -l)
 [ "$got" -eq 3000 ] || fail "3000 аргументов: передано $got"
+
+echo "== 5. команды из stdin (mysh < файл): сверка с bash =="
+
+check_stdin() {
+    local input=$1 brc mrc bout mout
+    bout=$(mktemp) mout=$(mktemp)
+ 
+    total=$((total + 1))
+    printf '%s' "$input" | bash >"$bout" 2>/dev/null; brc=$?
+    printf '%s' "$input" | "$MYSH" >"$mout" 2>/dev/null; mrc=$?
+    if [ "$brc" -ne "$mrc" ]; then
+        fail "stdin: код возврата bash $brc, mysh $mrc: $(printf '%q' "$input")"
+    elif ! cmp -s "$bout" "$mout"; then
+        fail "stdin: stdout отличается от bash: $(printf '%q' "$input")"
+    fi
+    rm -f "$bout" "$mout"
+}
+ 
+check_stdin $'echo one\necho two\n'
+check_stdin $'true\nfalse\n' 
+check_stdin $'false\ntrue\n'
+check_stdin $'echo one\n\n\necho two\n'
+check_stdin $'# комментарий\necho x\n'
+check_stdin $'echo "multi\nline"\necho after\n'
+check_stdin $'echo a\\\nb\n'
+check_stdin $'echo one\necho a ; ; b\necho three\n'
+check_stdin $'nosuchcmd_xyz\necho next\n'
+check_stdin ''
+check_stdin 'echo без перевода строки в конце'
+check_stdin $'false\n\n'
+check_stdin $'false\n# комментарий\n'
+check_stdin $'echo "abc\n'
+check_stdin $'cat\nпривет\nмир\n'
+check_stdin $'sh -c \'exit 7\'\n'
+check_stdin $'echo one\nsh -c \'exit 3\'\n\n\n'
 
 echo
 echo "Проверок: $total, провалено: $failed"
