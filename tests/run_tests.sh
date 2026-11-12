@@ -178,6 +178,73 @@ args=$(seq 1 3000 | tr '\n' ' ')
 got=$("$MYSH" -c "printf '%s\n' $args" </dev/null 2>&1 | wc -l)
 [ "$got" -eq 3000 ] || fail "3000 аргументов: передано $got"
 
+echo "== 4б. перенаправления: сверка с bash =="
+ 
+dir_state() {
+    local f
+    for f in $(ls -A); do
+        printf '== %s (%s)\n' "$f" "$(stat -c %a "$f")"
+        cat "$f" 2>&1
+    done
+}
+ 
+check_files() {
+    local setup=$1 cmd=$2 tmp brc mrc
+    local bout berr mout merr bstate mstate
+ 
+    total=$((total + 1))
+    tmp=$(mktemp -d)
+    bout=$tmp/bout berr=$tmp/berr mout=$tmp/mout merr=$tmp/merr
+ 
+    mkdir "$tmp/b" "$tmp/m"
+    (cd "$tmp/b" && bash -c "$setup" >/dev/null 2>&1 </dev/null)
+    (cd "$tmp/m" && bash -c "$setup" >/dev/null 2>&1 </dev/null)
+    (cd "$tmp/b" && { bash -c "$cmd" >"$bout" 2>"$berr" </dev/null; } 2>/dev/null)
+    brc=$?
+    (cd "$tmp/m" && { "$MYSH" -c "$cmd" >"$mout" 2>"$merr" </dev/null; } 2>/dev/null)
+    mrc=$?
+    bstate=$(cd "$tmp/b" && dir_state)
+    mstate=$(cd "$tmp/m" && dir_state)
+ 
+    if [ "$brc" -ne "$mrc" ]; then
+        fail "перенаправление: код возврата bash $brc, mysh $mrc: $(printf '%q' "$cmd")"
+    elif ! cmp -s "$bout" "$mout"; then
+        fail "перенаправление: stdout отличается от bash: $(printf '%q' "$cmd")"
+    elif [ "$(strip_prefix <"$berr")" != "$(strip_prefix <"$merr")" ]; then
+        fail "перенаправление: текст ошибки отличается от bash: $(printf '%q' "$cmd")"
+    elif [ "$bstate" != "$mstate" ]; then
+        fail "перенаправление: файлы отличаются от bash: $(printf '%q' "$cmd")"
+    fi
+    rm -rf "$tmp"
+}
+ 
+case $MYSH in
+    /*) ;;
+    *)  MYSH=$PWD/$MYSH ;;
+esac
+ 
+check_files '' 'echo hi > out'
+check_files '' '/bin/echo hi > out'
+check_files '' '> out echo hi'
+check_files '' 'echo a > out1 b > out2 c'
+check_files 'echo old > f' 'echo new > f'
+check_files 'echo old > f' 'echo new >> f'
+check_files '' 'echo one >> f'
+check_files 'echo old longer text > f' 'echo x > f'
+check_files 'echo data > in' 'cat < in'
+check_files 'echo data > in' 'cat < in > out'
+check_files 'echo data > in' '< in cat > out'
+check_files 'echo a > f; echo b > g' 'cat < f < g'
+check_files '' 'cat < nosuchfile'
+check_files '' 'cat < nosuchfile > out'
+check_files '' 'echo hi > nosuchdir/out'
+check_files '' 'echo hi > /etc'
+check_files '' 'echo hi > out < nosuchfile'
+check_files '' 'nosuchcmd_xyz > out'
+check_files '' 'echo hi > a > b'
+check_files 'echo x > f; chmod 000 f' 'cat < f'
+check_files 'echo x > f; chmod 444 f' 'echo y > f'
+
 echo "== 5. команды из stdin (mysh < файл): сверка с bash =="
 
 check_stdin() {

@@ -2,6 +2,7 @@
     executor.c — выполнение дерева команд
 */
 #include "executor.h"
+#include "redirect.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -41,7 +42,7 @@ static int status_to_code(int status)
     return EXIT_GENERAL;
 }
 
-static int run_external(char *const *argv)
+static int run_external(char *const *argv,const redirection *redirs, size_t redirs_count)
 {
     pid_t pid;
     int status;
@@ -53,6 +54,8 @@ static int run_external(char *const *argv)
         return EXIT_GENERAL;
     }
     if (pid == 0) {
+        if (redir_apply(redirs, redirs_count) < 0)
+            _exit(EXIT_GENERAL);
         execvp(argv[0], argv);
         exec_failed(argv[0]);
     }
@@ -76,9 +79,6 @@ static int exec_simple(const simple_command *s)
     char **argv;
     int rc;
 
-    if (s->redirs_count > 0)
-        return not_implemented("redirections");
-
     argv = malloc((s->argv_count + 1) * sizeof *argv);
     if (argv == NULL) {
         fprintf(stderr, "mysh: out of memory\n");
@@ -86,7 +86,7 @@ static int exec_simple(const simple_command *s)
     }
     memcpy(argv, s->argv, s->argv_count * sizeof *argv);
     argv[s->argv_count] = NULL;
-    rc = run_external(argv);
+    rc = run_external(argv, s->redirs, s->redirs_count);
     free(argv);
     return rc;
 }
