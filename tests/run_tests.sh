@@ -245,6 +245,59 @@ check_files '' 'echo hi > a > b'
 check_files 'echo x > f; chmod 000 f' 'cat < f'
 check_files 'echo x > f; chmod 444 f' 'echo y > f'
 
+echo "== 4в. списки, && и ||: сверка с bash =="
+ 
+check_run 'true && echo yes'
+check_run 'false && echo yes'
+check_run 'true || echo no'
+check_run 'false || echo yes'
+check_run 'false && echo a || echo b'
+check_run 'true && echo a || echo b'
+check_run 'true && false || echo b'
+check_run 'false || true && echo c'
+check_run 'false || false || echo c'
+check_run 'true && true && false'
+check_run 'false && false && true'
+check_run 'echo a; echo b'
+check_run 'echo a; echo b; echo c'
+check_run 'true; false'
+check_run 'false; true'
+check_run 'echo a;'
+check_run 'false && echo a; echo b'
+check_run 'true || echo a; false'
+check_run 'false || echo a; echo b && echo c'
+check_run "sh -c 'exit 3' || echo got"
+check_run "sh -c 'exit 3' && echo not_shown"
+check_run "sh -c 'exit 3'; echo after"
+check_run 'nosuchcmd_xyz && echo a'
+check_run 'nosuchcmd_xyz || echo a'
+check_run 'nosuchcmd_xyz; echo next'
+check_run 'true; nosuchcmd_xyz'
+check_run '/etc; echo a'
+check_run 'echo a
+echo b'
+check_files '' 'echo a > f; echo b >> f'
+check_files '' 'echo a > f && echo b >> f'
+check_files '' 'false && echo a > f'
+check_files '' 'cat < nosuchfile || echo b > g'
+check_files '' 'cat < nosuchfile && echo b > g; echo c > h'
+ 
+check_not_run() {
+    local cmd=$1 out rc
+ 
+    total=$((total + 1))
+    out=$("$MYSH" -c "$cmd" 2>/dev/null </dev/null)
+    rc=$?
+    if [ "$rc" -ne 1 ] || [ -n "$out" ]; then
+        fail "неподдерживаемая конструкция выполнена частично (код $rc, вывод '$out'): $(printf '%q' "$cmd")"
+    fi
+}
+ 
+check_not_run 'echo a; echo b &'
+check_not_run 'echo a & echo b'
+check_not_run 'echo a; echo b | cat'
+check_not_run 'echo a && (echo b)'
+
 echo "== 5. команды из stdin (mysh < файл): сверка с bash =="
 
 check_stdin() {

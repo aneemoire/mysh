@@ -5,6 +5,7 @@
 #include "redirect.h"
 
 #include <errno.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -68,12 +69,6 @@ static int run_external(char *const *argv,const redirection *redirs, size_t redi
     return status_to_code(status);
 }
 
-static int not_implemented(const char *what)
-{
-    fprintf(stderr, "mysh: not implemented yet: %s\n", what);
-    return EXIT_GENERAL;
-}
-
 static int exec_simple(const simple_command *s)
 {
     char **argv;
@@ -91,18 +86,53 @@ static int exec_simple(const simple_command *s)
     return rc;
 }
 
+static const char *find_unsupported(const ast_list *list)
+{
+    for (size_t i = 0; i < list->count; i++) {
+        const and_or *ao = &list->items[i];
+ 
+        if (list->seps[i] == SEP_BG)
+            return "background (&)";
+        for (size_t j = 0; j < ao->count; j++) {
+            const pipeline *pl = &ao->pipelines[j];
+ 
+            if (pl->count > 1)
+                return "pipelines";
+            if (pl->commands[0].type != CMD_SIMPLE)
+                return "subshells";
+        }
+    }
+    return NULL;
+}
+ 
+static int exec_pipeline(const pipeline *pl)
+{
+    return exec_simple(&pl->commands[0].as.simple);
+}
+ 
+static int exec_and_or(const and_or *ao)
+{
+    int rc = exec_pipeline(&ao->pipelines[0]);
+ 
+    for (size_t i = 0; i < ao->count - 1; i++) {
+        bool run = ao->ops[i] == AND_IF_OP ? rc == 0 : rc != 0;
+ 
+        if (run)
+            rc = exec_pipeline(&ao->pipelines[i + 1]);
+    }
+    return rc;
+}
+
 int exec_list(const ast_list *list)
 {
-    const and_or *ao;
-    const pipeline *pl;
-
-    if (list->count == 0)
-        return 0;
-    ao = &list->items[0];
-    pl = &ao->pipelines[0];
-    if (list->count > 1 || list->seps[0] == SEP_BG || ao->count > 1 || pl->count > 1)
-        return not_implemented("lists, &&, ||, pipelines, background");
-    if (pl->commands[0].type != CMD_SIMPLE)
-        return not_implemented("subshells");
-    return exec_simple(&pl->commands[0].as.simple);
+    const char *what = find_unsupported(list);
+    int rc = 0;
+ 
+    if (what != NULL) {
+        fprintf(stderr, "mysh: not implemented yet: %s\n", what);
+        return EXIT_GENERAL;
+    }
+    for (size_t i = 0; i < list->count; i++)
+        rc = exec_and_or(&list->items[i]);
+    return rc;
 }
