@@ -95,3 +95,18 @@ err echo 'abc
 
 # наша ошибка, а bash принимает: \ в самом конце ввода 
 dev echo trailing\
+# вне базы: должны отвергаться, а не выполняться частично
+dev echo a 2> f
+dev echo a 2>f
+dev cat 0< f
+dev FOO=1 env
+dev if true
+dev { echo a; }
+dev ! true
+# а это допустимо: цифра не номер дескриптора, слово в кавычках, не первое слово
+ok echo 2 > f
+ok echo a2>f
+ok echo '2'>f
+ok echo FOO=1
+ok echo if then
+ok "if" arg

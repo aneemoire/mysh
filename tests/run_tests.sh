@@ -6,7 +6,7 @@
 #          make test
 # Для проверки на утечки и ошибки памяти:  bash tests/run_tests.sh ./mysh-debug
 #
-# Пять групп проверок:
+# Шесть групп проверок:
 #   1. syntax.txt  — «принято / отвергнуто» для --dump-ast -c (код 0 или 2),
 #                    результат сверяется ещё и с `bash -n`;
 #   2. многострочные команды — то же, но со значащими переводами строки;
@@ -14,6 +14,10 @@
 #   4. выполнение  — `mysh -c` и `bash -c` на одних и тех же командах:
 #                    совпадают код возврата, stdout и текст ошибки.
 #   5. скрипты на stdin — `mysh < ввод` и `bash < ввод`: код возврата и stdout.
+#   6. интерактивный режим через псевдотерминал (утилита script): Ctrl-C,
+#      Ctrl-Z, jobs, fg, bg, уведомления о заданиях, выход.
+# Группа 4 разбита на подгруппы: простые команды, перенаправления, списки,
+# конвейеры, встроенные команды, подоболочки, фон.
 # Интерактивный режим (приглашения, Ctrl-D) автоматически не проверяется
 # Код возврата скрипта: 0 — всё прошло, 1 — есть провалы.
 
@@ -141,6 +145,19 @@ check_run() {
         fail "текст ошибки отличается от bash: $(printf '%q' "$cmd")"
     fi
     rm -f "$bout" "$berr" "$mout" "$merr"
+}
+
+check_rc() {
+    local cmd=$1 brc mrc bout mout
+
+    total=$((total + 1))
+    bout=$(bash -c "$cmd" 2>/dev/null </dev/null); brc=$?
+    mout=$("$MYSH" -c "$cmd" 2>/dev/null </dev/null); mrc=$?
+    if [ "$brc" -ne "$mrc" ]; then
+        fail "код возврата: bash $brc, mysh $mrc: $(printf '%q' "$cmd")"
+    elif [ "$bout" != "$mout" ]; then
+        fail "stdout отличается от bash: $(printf '%q' "$cmd")"
+    fi
 }
  
 check_run 'true'
@@ -281,22 +298,240 @@ check_files '' 'echo a > f && echo b >> f'
 check_files '' 'false && echo a > f'
 check_files '' 'cat < nosuchfile || echo b > g'
 check_files '' 'cat < nosuchfile && echo b > g; echo c > h'
+
+echo "== 4г. конвейеры: сверка с bash =="
+
+check_run 'echo hi | cat'
+check_run 'echo a b c | wc -w'
+check_run "printf 'b\\na\\nc\\n' | sort"
+check_run 'echo hi | cat | cat | cat'
+check_run "echo x$(printf ' | cat%.0s' $(seq 1 50))"
+check_run 'seq 1 100000 | wc -l'
+check_run 'yes | head -3'
+check_run 'true | cat'
+check_run 'false | true'
+check_run 'true | false'
+check_run "sh -c 'exit 3' | sh -c 'exit 4'"
+check_run "sh -c 'exit 3' | cat"
+check_run "echo x | sh -c 'cat >/dev/null; exit 5'"
+check_run "sh -c 'kill -KILL \$\$' | cat"
+check_rc "echo x | sh -c 'kill -TERM \$\$'"
+check_run 'nosuchcmd_xyz | cat'
+check_run 'echo hi | nosuchcmd_xyz'
+check_rc 'nosuchcmd_xyz | nosuchcmd_abc'
+check_run 'echo hi | /etc'
+check_run 'echo a | cat && echo b'
+check_run 'false | cat || echo c'
+check_run 'echo a | cat; echo b | cat'
+check_run 'echo a | cat | wc -l; echo done'
+check_files 'echo data > in' 'cat < in | wc -l > out'
+check_files '' 'echo hi | cat > out'
+check_files '' 'echo a > f | cat'
+check_files '' 'echo a | cat > f | cat'
+check_files 'echo data > in' 'cat < in | cat < in'
+check_files '' 'cat < nosuchfile | echo x'
+check_files '' 'echo x | cat > nosuchdir/out'
+check_files '' 'echo a | cat >> f; echo b | cat >> f'
  
-check_not_run() {
-    local cmd=$1 out rc
- 
+total=$((total + 1))
+t0=$(date +%s%N)
+"$MYSH" -c 'sleep 1 | sleep 1 | sleep 1' </dev/null
+t1=$(date +%s%N)
+[ $(((t1 - t0) / 1000000)) -lt 2000 ] || fail "команды конвейера выполняются не параллельно: $(((t1 - t0) / 1000000)) мс"
+
+total=$((total + 1))
+base=$(printf 'ls /proc/self/fd\n' | "$MYSH" 2>&1)
+many=$({ for _ in $(seq 1 200); do printf 'echo x | cat > /dev/null\n'; done; printf 'ls /proc/self/fd\n'; } | "$MYSH" 2>&1)
+[ "$base" = "$many" ] || fail "утечка файловых дескрипторов после конвейеров: было '$(echo $base)', стало '$(echo $many)'"
+
+if command -v ps >/dev/null 2>&1; then
     total=$((total + 1))
-    out=$("$MYSH" -c "$cmd" 2>/dev/null </dev/null)
-    rc=$?
-    if [ "$rc" -ne 1 ] || [ -n "$out" ]; then
-        fail "неподдерживаемая конструкция выполнена частично (код $rc, вывод '$out'): $(printf '%q' "$cmd")"
-    fi
-}
- 
-check_not_run 'echo a; echo b &'
-check_not_run 'echo a & echo b'
-check_not_run 'echo a; echo b | cat'
-check_not_run 'echo a && (echo b)'
+    got=$("$MYSH" -c "echo a | cat | cat > /dev/null; sh -c 'ps -o stat= --ppid \$PPID'" </dev/null 2>&1)
+    case $got in
+        *Z*) fail "после конвейера остались зомби: $got" ;;
+    esac
+fi
+
+echo "== 4д. встроенные команды: сверка с bash =="
+
+check_run 'echo hello world'
+check_run 'echo -n hello'
+check_run 'echo -n'
+check_run 'echo -n -n x'
+check_run 'echo -nx'
+check_run 'echo a    b'
+check_run 'echo "a  b" c'
+check_run 'echo "" x'
+check_run 'echo --'
+check_run 'echo a\\nb'
+check_run 'echo hi | cat'
+check_run 'echo hi | cat | cat'
+check_run 'pwd'
+check_run 'pwd | cat'
+check_run 'cd /tmp; pwd'
+check_run 'cd /; pwd; cd /tmp; pwd'
+check_run 'cd /tmp && pwd'
+check_run 'cd /nonexistent_dir_xyz'
+check_run 'cd /nonexistent_dir_xyz || echo failed'
+check_run 'cd /etc/passwd'
+check_run 'cd /tmp /'
+check_run 'cd /tmp | pwd'
+check_run "cd /; sh -c 'echo \$PWD'"
+check_run 'exit 3'
+check_run 'exit'
+check_run 'false; exit'
+check_run 'exit 256'
+check_run 'exit 257'
+check_run 'exit -1'
+check_run 'exit 0; echo no'
+check_run 'exit abc'
+check_run 'exit 1 2; echo after'
+check_run 'exit abc def'
+check_run 'echo a; exit 4; echo b'
+check_run 'true && exit 5'
+check_run 'exit 3 | cat'
+check_run 'cat < /dev/null | exit 4'
+check_run 'echo x | exit 2'
+check_run 'help >/dev/null'
+check_run 'nosuchcmd_xyz; exit'
+check_run 'echo hi > /dev/full'
+check_rc 'pwd -x'
+check_run 'pwd extra'
+check_run 'echo a; cd /nonexistent_dir_xyz; echo b'
+check_files '' 'echo hi > out'
+check_files '' 'echo hi >> out; echo more >> out'
+check_files '' 'echo -n x > out'
+check_files 'echo old > f' 'echo new > f; echo after'
+check_files '' 'echo hi > nosuchdir/out'
+check_files '' 'echo hi > a > b'
+check_files '' 'echo a > f && echo b >> f'
+check_files 'echo data > in' 'cat < in | cat > out'
+check_files '' 'echo a | cat > out; echo b'
+check_files '' 'cd /nonexistent_dir_xyz > out'
+
+total=$((total + 1))
+bwant=$(HOME=/tmp bash -c 'cd; pwd' 2>&1)
+mgot=$(HOME=/tmp "$MYSH" -c 'cd; pwd' 2>&1)
+[ "$bwant" = "$mgot" ] || fail "cd без аргумента: bash '$bwant', mysh '$mgot'"
+total=$((total + 1))
+bwant=$(env -u HOME bash -c 'cd' 2>&1; echo "rc=$?")
+mgot=$(env -u HOME "$MYSH" -c 'cd' 2>&1; echo "rc=$?")
+[ "$(printf '%s' "$bwant" | strip_prefix)" = "$(printf '%s' "$mgot" | strip_prefix)" ] ||
+    fail "cd без HOME: bash '$bwant', mysh '$mgot'"
+
+echo "== 4е. подоболочки: сверка с bash =="
+
+check_run '(echo a)'
+check_run '(echo a; echo b)'
+check_run '(echo a; echo b) | wc -l'
+check_run 'echo x | (cat; echo y)'
+check_run '(echo a | cat; echo b) | cat'
+check_run '(cd /; pwd); pwd'
+check_run '(cd /tmp); pwd'
+check_run '(exit 3)'
+check_run '(exit 3); echo after'
+check_run '(exit 3) || echo failed'
+check_run '(false; true)'
+check_run '(true; false)'
+check_run '(false)'
+check_run '( (echo a) )'
+check_run '( (echo a; echo b) | cat )'
+check_run '( ( ( ( ( ( ( ( ( ( echo deep ) ) ) ) ) ) ) ) ) )'
+check_run '(echo a && echo b)'
+check_run '(false && echo a || echo b)'
+check_run '(exit 3; echo no)'
+check_run '( (exit 2) )'
+check_run '(nosuchcmd_xyz)'
+check_run '(nosuchcmd_xyz) || echo failed'
+check_run '(echo a) && (echo b) ; (echo c)'
+check_run '(echo a) | (cat) | (cat)'
+check_run '(exit 2) | (exit 3)'
+check_run '(echo a; exit 5; echo b)'
+check_run '(echo a
+echo b)'
+check_files '' '(echo a; echo b) > out'
+check_files '' '(echo a; echo b) >> out'
+check_files 'echo data > in' '(cat) < in'
+check_files 'echo data > in' '(cat; echo y) < in > out'
+check_files '' '(echo a > f; echo b >> f)'
+check_files '' '(echo a) > out | cat'
+check_files '' '(echo a > f1) > f2'
+check_files '' '(cat < nosuchfile) > out'
+check_files '' '(echo a) > nosuchdir/out'
+check_files '' '(echo a; echo b) > out; echo c'
+
+echo "== 4ж. фон, jobs, wait, kill (без терминала): сверка с bash =="
+
+check_run 'echo a & wait; echo b'
+check_run 'sleep 0.1 & wait; echo done'
+check_run 'sleep 0.1 & echo started; wait'
+check_run 'sleep 0.1 & sleep 0.1 & wait; echo done'
+check_run 'false & wait %1'
+check_run 'true & wait %1'
+check_run "sh -c 'exit 5' & wait %1"
+check_run "sh -c 'exit 5' & wait %1; echo after"
+check_run 'echo a & echo b & wait'
+check_run 'true & true; wait; echo ok'
+check_run 'wait'
+check_run 'wait %1'
+check_run 'wait %5'
+check_run 'wait 99999'
+check_run 'wait abc'
+check_run 'true && echo a & wait'
+check_run '(sleep 0.1; echo a) & wait; echo b'
+check_run '(sleep 0.1; echo a) & echo b; wait'
+check_run 'echo a | cat & wait; echo b'
+check_run 'echo a | cat | cat & wait'
+check_run 'sleep 0.1 & jobs; wait'
+check_run 'sleep 0.1 & sleep 0.2 & jobs; wait'
+check_run 'sleep 0.1 & wait; jobs'
+check_run 'sleep 0.1 & sleep 0.4; jobs'
+check_run 'sleep 0.1 & sleep 0.1 & sleep 0.4; jobs'
+check_run 'sh -c "exit 3" & sleep 0.3; wait %1'
+check_run 'sh -c "exit 3" & sleep 0.3; jobs; wait %1'
+check_run 'sh -c "exit 3" & sleep 0.3; wait'
+check_run 'sleep 0.1 & sleep 0.4; echo x; jobs; echo y'
+check_run 'sleep 0.1 && echo x & jobs; wait'
+check_run 'jobs'
+check_run 'fg'
+check_run 'bg'
+check_run 'sleep 0.1 & fg'
+check_run 'sleep 0.1 & bg'
+check_rc 'sleep 5 & kill %1; wait %1'
+check_rc 'sleep 5 & kill -9 %1; wait %1'
+check_rc 'sleep 5 & kill -KILL %1; wait %1'
+check_rc 'sleep 5 & kill -s SIGTERM %1; wait %1'
+check_rc 'sleep 5 & kill -TERM %1; wait %1'
+check_run 'kill %1'
+check_rc 'kill'
+check_run 'kill -s'
+check_run 'kill -NOSUCH 1'
+check_run 'kill abc'
+check_run 'kill 99999999'
+check_run 'kill -0 1 || true'
+check_run 'sleep 0.1 & kill -0 %1; wait'
+check_files '' 'echo a > f & wait'
+check_files '' 'echo a > f & wait; echo b >> f'
+check_files '' '(echo a; echo b) > out & wait'
+
+total=$((total + 1))
+got=$(printf 'data\n' | "$MYSH" -c 'cat & wait; echo end' 2>&1)
+want=$(printf 'data\n' | bash -c 'cat & wait; echo end' 2>&1)
+[ "$got" = "$want" ] || fail "фоновая команда читает stdin: bash '$want', mysh '$got'"
+
+total=$((total + 1))
+t0=$(date +%s%N)
+"$MYSH" -c 'sleep 1 & echo x' </dev/null >/dev/null
+t1=$(date +%s%N)
+[ $(((t1 - t0) / 1000000)) -lt 800 ] || fail "фоновая команда блокирует интерпретатор: $(((t1 - t0) / 1000000)) мс"
+
+if command -v ps >/dev/null 2>&1; then
+    total=$((total + 1))
+    got=$("$MYSH" -c "sleep 0.1 & sleep 0.5; sh -c 'ps -o stat= --ppid \$PPID'" </dev/null 2>&1)
+    case $got in
+        *Z*) fail "после фонового задания остались зомби: $got" ;;
+    esac
+fi
 
 echo "== 5. команды из stdin (mysh < файл): сверка с bash =="
 
@@ -332,6 +567,114 @@ check_stdin $'echo "abc\n'
 check_stdin $'cat\nпривет\nмир\n'
 check_stdin $'sh -c \'exit 7\'\n'
 check_stdin $'echo one\nsh -c \'exit 3\'\n\n\n'
+check_stdin $'echo a\nexit 3\necho b\n'
+check_stdin $'false\nexit\n'
+check_stdin $'cd /tmp\npwd\n'
+check_stdin $'(cd /; pwd)\npwd\n'
+check_stdin $'echo a | cat\necho b | cat\n'
+check_stdin $'sleep 0.1 &\nwait\necho x\n'
+check_stdin $'cat &\nwait\necho x\n'
+check_stdin $'echo a > /dev/null\necho b\n'
+check_stdin $'exit 2\n'
+
+echo "== 6. интерактивный режим (псевдотерминал) =="
+
+pty_run() {
+    local a
+    PTY_OUT=$({
+        for a in "$@"; do
+            case $a in
+                @*) sleep "${a#@}" ;;
+                *)  printf '%b' "$a" ;;
+            esac
+        done
+    } | script -qefc "$MYSH" /dev/null 2>&1 | tr -d '\r'; exit "${PIPESTATUS[1]}")
+    PTY_RC=$?
+}
+
+pty_expect() {
+    total=$((total + 1))
+    printf '%s\n' "$PTY_OUT" | grep -Eq -- "$2" ||
+        fail "интерактивный режим, $1: нет '$2' в выводе $(printf '%q' "$PTY_OUT")"
+}
+
+pty_reject() {
+    total=$((total + 1))
+    if printf '%s\n' "$PTY_OUT" | grep -Eq -- "$2"; then
+        fail "интерактивный режим, $1: лишнее '$2' в выводе $(printf '%q' "$PTY_OUT")"
+    fi
+}
+
+pty_rc() {
+    total=$((total + 1))
+    [ "$PTY_RC" -eq "$2" ] || fail "интерактивный режим, $1: код выхода $PTY_RC, ожидался $2"
+}
+
+if command -v script >/dev/null 2>&1; then
+    pty_run 'echo hello\n' @0.2 'echo a | cat\n' @0.2 'exit 3\n' @0.2
+    pty_expect 'простая команда' '(^|> )hello$'
+    pty_expect 'конвейер' '^a$'
+    pty_rc 'exit 3' 3
+
+    pty_run @0.3 '\003' @0.2 'echo alive\n' @0.2 'exit\n' @0.2
+    pty_expect 'Ctrl-C на приглашении не мешает работе' '^alive$'
+
+    pty_run 'sleep 100\n' @0.4 '\003' @0.3 'echo alive\n' @0.2 'jobs\n' @0.2 'exit\n' @0.2
+    pty_expect 'Ctrl-C прерывает задание переднего плана' '^alive$'
+    pty_reject 'прерванное задание не остаётся в jobs' 'Running|Stopped'
+
+    pty_run 'sleep 100\n' @0.4 '\032' @0.3 'jobs\n' @0.3 'bg\n' @0.3 'jobs\n' @0.3 \
+            'fg\n' @0.4 '\003' @0.3 'echo alive\n' @0.2 'exit 5\n' @0.2
+    pty_expect 'Ctrl-Z останавливает задание' '\[1\]\+ +Stopped +sleep 100'
+    pty_expect 'bg выводит строку задания' '^\[1\]\+ sleep 100 &$'
+    pty_expect 'jobs показывает Running' '\[1\]\+ +Running +sleep 100 &'
+    pty_expect 'fg печатает команду' '^sleep 100$'
+    pty_expect 'после fg и Ctrl-C интерпретатор работает' '^alive$'
+    pty_rc 'выход после заданий' 5
+
+    pty_run 'sleep 0.3 &\n' @0.8 'echo x\n' @0.2 'jobs\n' @0.2 'exit\n' @0.2
+    pty_expect 'строка запуска в фоне' '(^|> )\[1\] [0-9]+$'
+    pty_expect 'уведомление Done перед приглашением' '\[1\]\+ +Done +sleep 0.3'
+    pty_reject 'уведомлённое задание удалено' '^\[1\][+-] +Done.*\n.*Done'
+
+    pty_run 'sleep 100 &\n' 'sleep 101 &\n' 'jobs\n' @0.2 'kill %1 %2\n' @0.4 'echo x\n' @0.2 'jobs\n' 'exit\n' @0.2
+    pty_expect 'маркер - у предыдущего задания' '\[1\]- +Running +sleep 100 &'
+    pty_expect 'маркер + у текущего задания' '\[2\]\+ +Running +sleep 101 &'
+    pty_expect 'уведомление о завершении по сигналу' 'Terminated +sleep 10[01]'
+
+    pty_run 'sleep 100 &\n' 'kill %1\n' 'wait %1\n' 'echo ok\n' @0.2 'sleep 0.2 &\n' 'wait\n' 'echo ok2\n' 'exit\n' @0.2
+    pty_expect 'wait после kill' '(^|> )ok$'
+    pty_expect 'wait без аргументов' '(^|> )ok2$'
+
+    pty_run 'fg\n' 'bg\n' 'fg %7\n' 'exit\n' @0.2
+    pty_expect 'fg и bg без заданий' 'fg: current: no such job'
+    pty_expect 'bg без заданий' 'bg: current: no such job'
+    pty_expect 'fg с неверным номером' 'fg: %7: no such job'
+
+    pty_run 'sleep 100\n' @0.4 '\032' @0.3 'exit\n' @0.3 'exit 5\n' @0.3
+    pty_expect 'exit с остановленным заданием предупреждает' 'stopped jobs'
+    pty_rc 'повторный exit завершает работу' 5
+
+    pty_run 'sleep 100\n' @0.4 '\032' @0.3 '\004' @0.3 '\004' @0.3
+    pty_expect 'Ctrl-D с остановленным заданием предупреждает' 'stopped jobs'
+    pty_rc 'повторный Ctrl-D завершает работу (код последней команды)' 148
+
+    pty_run @0.2 '\004' @0.3
+    pty_expect 'Ctrl-D печатает exit' '(^|> )exit$'
+    pty_rc 'Ctrl-D' 0
+
+    pty_run 'sleep 100 | cat\n' @0.4 '\032' @0.3 'jobs\n' @0.3 'fg\n' @0.4 '\003' @0.3 'echo alive\n' @0.2 'exit\n' @0.2
+    pty_expect 'конвейер останавливается целиком' '\[1\]\+ +Stopped +sleep 100 \| cat'
+    pty_expect 'fg конвейера' '^sleep 100 \| cat$'
+    pty_expect 'после Ctrl-C в конвейере интерпретатор работает' '^alive$'
+
+    pty_run '(echo a; echo b) | cat\n' @0.2 'sleep 0.2 && echo done &\n' @0.2 @0.6 'echo x\n' @0.2 'exit\n' @0.2
+    pty_expect 'подоболочка в конвейере' '^b$'
+    pty_expect 'цепочка в фоне выполнилась' '(^|> )done$'
+    pty_expect 'цепочка в фоне - одно задание' '\[1\] [0-9]+'
+else
+    echo "утилита script не найдена: группа пропущена"
+fi
 
 echo
 echo "Проверок: $total, провалено: $failed"
