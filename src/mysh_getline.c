@@ -1,5 +1,6 @@
 #include "mysh_getline.h"
 
+#include <errno.h>
 #include <stdlib.h>
 
 #define LINE_BUF_INIT 128 // начальная ёмкость буфера
@@ -18,6 +19,10 @@ long mysh_getline(char **buf, size_t *cap, FILE *stream)
     for (;;) {
         int c = fgetc(stream);
         if (c == EOF) {
+            if (ferror(stream) && errno == EINTR) {
+                clearerr(stream);
+                continue;
+            }
             if (len == 0)
                 return -1;
             break;

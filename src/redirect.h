@@ -14,4 +14,12 @@
 
 int redir_apply(const redirection *redirs, size_t count);
 
+typedef struct {
+    int in;
+    int out; 
+} redir_saved;
+
+int redir_save(redir_saved *saved);
+int redir_restore(const redir_saved *saved);
+
 #endif
