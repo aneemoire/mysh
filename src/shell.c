@@ -11,6 +11,7 @@
 
 #include "ast.h"
 #include "executor.h"
+#include "jobs.h"
 #include "lexer.h"
 #include "mysh_getline.h"
 #include "parser.h"
@@ -25,11 +26,12 @@ typedef enum {
     OUT_DONE,  
     OUT_INCOMPLETE,
     OUT_SYNTAX_ERROR, 
-    OUT_FATAL 
+    OUT_FATAL, 
+    OUT_EXIT 
 } outcome;
 
 // парсит токены и выполняет или печатает результат
-static outcome run_tokens(const token_list *tokens, run_mode mode, int last, int *rc)
+static outcome run_tokens(const token_list *tokens, run_mode mode, exec_ctx *ctx, int *rc)
 {
     ast_list tree;
     char *error = NULL;
@@ -51,16 +53,16 @@ static outcome run_tokens(const token_list *tokens, run_mode mode, int last, int
         ast_list_dump(&tree, stdout);
         *rc = 0;
     } else if (tree.count == 0) {
-        *rc = last;
+        *rc = ctx->last_status;
     } else {
-        *rc = exec_list(&tree);
+        *rc = exec_list(&tree, ctx);
     }
     ast_list_free(&tree);
-    return OUT_DONE;
+    return ctx->exit_requested ? OUT_EXIT : OUT_DONE;
 }
 
 // обрабатывает одну полную команду
-static outcome process(const char *input, run_mode mode, int last, int *rc, lex_status *lex_st)
+static outcome process(const char *input, run_mode mode, exec_ctx *ctx, int *rc, lex_status *lex_st)
 {
     token_list tokens;
     outcome out;
@@ -68,32 +70,42 @@ static outcome process(const char *input, run_mode mode, int last, int *rc, lex_
     *lex_st = lex(input, &tokens);
     if (*lex_st == LEX_UNCLOSED_QUOTE || *lex_st == LEX_TRAILING_ESCAPE)
         return OUT_INCOMPLETE;
-    if (*lex_st != LEX_OK) { /* остался LEX_NOMEM */
-        fprintf(stderr, "mysh: %s\n", lex_status_message(*lex_st));
-        *rc = EXIT_GENERAL;
-        return OUT_FATAL;
+    if (*lex_st == LEX_UNSUPPORTED_FD) {
+    fprintf(stderr, "mysh: %s\n", lex_status_message(*lex_st));
+    *rc = EXIT_SYNTAX;
+    return OUT_SYNTAX_ERROR;
     }
     if (mode == RUN_DUMP_TOKENS) {
         token_list_dump(&tokens, stdout);
         *rc = 0;
         out = OUT_DONE;
     } else {
-        out = run_tokens(&tokens, mode, last, rc);
+        out = run_tokens(&tokens, mode, ctx, rc);
     }
     token_list_free(&tokens);
     return out;
 }
 
+static bool runtime_init(bool interactive, run_mode mode)
+{
+    if (mode != RUN_EXEC)
+        return false;
+    return jobs_init(interactive) == 0 && interactive;
+}
+
 int shell_run_string(const char *input, run_mode mode)
 {
+    exec_ctx ctx = { .job_control = runtime_init(false, mode) };
     lex_status lex_st;
+    outcome out;
     int rc = 0;
 
-    if (process(input, mode, 0, &rc, &lex_st) == OUT_INCOMPLETE) {
+    out = process(input, mode, &ctx, &rc, &lex_st);
+    if (out == OUT_INCOMPLETE) {
         fprintf(stderr, "mysh: %s\n", lex_status_message(lex_st));
         return EXIT_SYNTAX;
     }
-    return rc;
+    return out == OUT_EXIT ? ctx.exit_code : rc;
 }
 
 static bool append(char **acc, size_t *acc_len, const char *line, size_t n)
@@ -114,49 +126,71 @@ static void prompt(bool interactive, const char *text)
         fputs(text, stderr);
 }
 
+static bool eof_blocked_by_jobs(exec_ctx *ctx)
+{
+    if (!ctx->job_control || ctx->exit_warned || !jobs_has_stopped())
+        return false;
+    fprintf(stderr, "\nmysh: There are stopped jobs.\n");
+    ctx->exit_warned = true;
+    return true;
+}
+
 int shell_run_stdin(run_mode mode)
 {
     const bool interactive = isatty(STDIN_FILENO);
+    exec_ctx ctx = { .job_control = runtime_init(interactive, mode) };
     char *line = NULL, *acc = NULL;
     size_t line_cap = 0, acc_len = 0;
-    int last = 0;
     long n;
 
     if (!interactive)
         setvbuf(stdin, NULL, _IONBF, 0);
 
+    if (ctx.job_control)
+        jobs_notify();
     prompt(interactive, PROMPT_PRIMARY);
-    while ((n = mysh_getline(&line, &line_cap, stdin)) != -1) {
+    for (;;) {
         lex_status lex_st;
-        int rc = last;
+        int rc = ctx.last_status;
         outcome out;
 
+        n = mysh_getline(&line, &line_cap, stdin);
+        if (n == -1) {
+            if (acc_len == 0 && eof_blocked_by_jobs(&ctx)) {
+                clearerr(stdin);
+                prompt(interactive, PROMPT_PRIMARY);
+                continue;
+            }
+            break;
+        }
         if (!append(&acc, &acc_len, line, (size_t)n)) {
             fprintf(stderr, "mysh: out of memory\n");
-            last = EXIT_GENERAL;
+            ctx.last_status = EXIT_GENERAL;
             goto done;
         }
-        out = process(acc, mode, last, &rc, &lex_st);
+        out = process(acc, mode, &ctx, &rc, &lex_st);
         if (out == OUT_INCOMPLETE) {
             prompt(interactive, PROMPT_SECONDARY);
             continue;
         }
-        last = rc;
+        ctx.last_status = out == OUT_EXIT ? ctx.exit_code : rc;
 
-        if (out == OUT_FATAL || (out == OUT_SYNTAX_ERROR && !interactive))
+        if (out == OUT_FATAL || out == OUT_EXIT || (out == OUT_SYNTAX_ERROR && !interactive))
             goto done;
         acc_len = 0;
+        if (ctx.job_control)
+            jobs_notify(); // уведомления о фоновых заданиях - перед приглашением
         prompt(interactive, PROMPT_PRIMARY);
     }
 
     if (acc_len > 0) {
         fprintf(stderr, "mysh: syntax error: unexpected EOF\n");
-        last = EXIT_SYNTAX;
+        ctx.last_status = EXIT_SYNTAX;
     }
     if (interactive)
-        fputc('\n', stderr);
+        fputs("exit\n", stderr);
 done:
     free(line);
     free(acc);
-    return last;
+    return ctx.last_status;
 }

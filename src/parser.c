@@ -1,7 +1,8 @@
 /*
-parser.c - синтаксический анализ
-Разбор методом рекурсивного спуска: каждому правилу грамматики соответствует функция parse_<имя_правила>, которая читает часть token_list и строит часть дерева. 
-Сейчас реализовано только правило simple (и redirection внутри него)
+    parser.c - синтаксический анализ
+
+    Разбор методом рекурсивного спуска: каждому правилу грамматики соответствует функция parse_<имя_правила>, которая читает часть token_list и строит часть дерева. 
+    Ошибки: конструкции вне базы (зарезервированные слова, присваивания) отвергаются.
 */
 #include "parser.h"
 
@@ -54,6 +55,32 @@ static bool unexpected(parser_state *p)
     snprintf(p->msg, sizeof p->msg, "syntax error: unexpected token '%.40s'", shown);
     return fail(p, p->msg);
 }
+
+static const char *const RESERVED[] = {
+    "if", "then", "else", "elif", "fi", "while", "until", "do", "done", "for",
+    "case", "esac", "in", "function", "select", "time", "!", "{", "}", "[[", "]]"
+};
+
+static bool unsupported_command_word(const token *t)
+{
+    const char *s = t->text;
+
+    if (t->quoted)
+        return false;
+    for (size_t i = 0; i < sizeof RESERVED / sizeof RESERVED[0]; i++)
+        if (strcmp(s, RESERVED[i]) == 0)
+            return true;
+    if (s[0] == '_' || (s[0] >= 'A' && s[0] <= 'Z') || (s[0] >= 'a' && s[0] <= 'z')) {
+        size_t i = 1;
+
+        while (s[i] == '_' || (s[i] >= '0' && s[i] <= '9') ||
+               (s[i] >= 'A' && s[i] <= 'Z') || (s[i] >= 'a' && s[i] <= 'z'))
+            i++;
+        return s[i] == '=';
+    }
+    return false;
+}
+
  
 static bool is_redir(token_type t)
 {
@@ -96,8 +123,14 @@ static bool parse_simple(parser_state *p, simple_command *s)
             if (!parse_redirection(p, &redirs))
                 return false;
         } else if (p->tok->type == TOK_WORD) {
-            char **w = ast_vec_add(p->mem, &words, sizeof *w);
+            char **w;
  
+            if (words.n == 0 && unsupported_command_word(p->tok)) {
+                snprintf(p->msg, sizeof p->msg, "syntax error: '%.40s' is not supported", p->tok->text);
+                return fail(p, p->msg);
+            }
+            w = ast_vec_add(p->mem, &words, sizeof *w);
+            
             if (w == NULL || (*w = ast_strdup(p->mem, p->tok->text)) == NULL)
                 return false;
             next(p);
