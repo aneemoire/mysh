@@ -27,6 +27,7 @@ typedef struct {
     char *data; 
     size_t len;
     size_t cap;
+    bool quoted;
 } strbuf;
 
 static bool strbuf_init(strbuf *b)
@@ -34,6 +35,7 @@ static bool strbuf_init(strbuf *b)
     b->data = malloc(WORD_BUF_INIT);
     b->len = 0;
     b->cap = WORD_BUF_INIT;
+    b->quoted = false;
     return b->data != NULL;
 }
 
@@ -94,7 +96,9 @@ static bool flush_word(token_list *l, strbuf *b,  bool *in_word)
         free(text);
         return false;
     }
+    l->items[l->count - 1].quoted = b->quoted;
     b->len = 0;
+    b->quoted = false;
     *in_word = false;
     return true;
 }
@@ -175,6 +179,16 @@ static step_result step_dquote(const char *s, size_t *i, strbuf *word, lex_mode 
     return STEP_CONTINUE;
 }
 
+static bool is_plain_number(const strbuf *b)
+{
+    if (b->quoted || b->len == 0)
+        return false;
+    for (size_t i = 0; i < b->len; i++)
+        if (b->data[i] < '0' || b->data[i] > '9')
+            return false;
+    return true;
+}
+
 static step_result step_normal(const char *s, size_t *i, strbuf *word, bool *in_word, lex_mode *mode, token_list *out, lex_status *status)
 {
     char c = s[*i];
@@ -190,6 +204,10 @@ static step_result step_normal(const char *s, size_t *i, strbuf *word, bool *in_
  
     if (strchr(OPERATOR_CHARS, c) != NULL) {
         size_t len;
+        if ((c == '<' || c == '>') && is_plain_number(word)) {
+            *status = LEX_UNSUPPORTED_FD;
+            return STEP_ERROR;
+        }
         token_type type = read_operator(s + *i, &len);
         if (!flush_word(out, word, in_word) || !list_push(out, type, NULL)) {
             *status = LEX_NOMEM;
@@ -207,6 +225,7 @@ static step_result step_normal(const char *s, size_t *i, strbuf *word, bool *in_
  
     if (c == '\'') {
         *mode = MODE_SQUOTE;
+        word->quoted = true;
         *in_word = true;
         (*i)++;
         return STEP_CONTINUE;
@@ -214,6 +233,7 @@ static step_result step_normal(const char *s, size_t *i, strbuf *word, bool *in_
  
     if (c == '"') {
         *mode = MODE_DQUOTE;
+        word->quoted = true;
         *in_word = true;
         (*i)++;
         return STEP_CONTINUE;
@@ -231,6 +251,7 @@ static step_result step_normal(const char *s, size_t *i, strbuf *word, bool *in_
             return STEP_CONTINUE;
         }
         if (!strbuf_push(word, n)) { *status = LEX_NOMEM; return STEP_ERROR; }
+        word->quoted = true;
         *in_word = true;
         *i += 2;
         return STEP_CONTINUE;
@@ -290,10 +311,11 @@ fail:
 const char *lex_status_message(lex_status status)
 {
     switch (status) {
-    case LEX_OK:              return "ok";
-    case LEX_UNCLOSED_QUOTE:  return "syntax error: unexpected EOF while looking for matching quote";
-    case LEX_NOMEM:           return "out of memory";
+    case LEX_OK: return "ok";
+    case LEX_UNCLOSED_QUOTE: return "syntax error: unexpected EOF while looking for matching quote";
+    case LEX_NOMEM: return "out of memory";
     case LEX_TRAILING_ESCAPE: return "syntax error: unexpected EOF after backslash";
+    case LEX_UNSUPPORTED_FD: return "syntax error: file descriptor before redirection is not supported";
     }
     return "unknown error";
 }
